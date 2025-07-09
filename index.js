@@ -248,7 +248,8 @@ client.on('interactionCreate', async interaction => {
 
       let msg = '📆 今後1週間のイベント一覧:\n';
       for (const e of events.values()) {
-        const ts      = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
+        const ts = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
+          timeZone: 'Asia/Tokyo',
           weekday: 'short', year: 'numeric',
           month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit'
