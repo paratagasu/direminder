@@ -66,13 +66,18 @@ async function fetchTodaysEvents(guild) {
   });
 }
 async function fetchWeekEvents(guild) {
-  const now = new Date();
-  const weekLater = new Date(now);
-  weekLater.setDate(now.getDate() + 7);
   const all = await guild.scheduledEvents.fetch();
+
+  const today = new Date();
+  const todayJST = new Date(today.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+  const weekLaterJST = new Date(todayJST);
+  weekLaterJST.setDate(todayJST.getDate() + 7);
+
   return all.filter(e => {
-    const s = new Date(e.scheduledStartTimestamp);
-    return s >= now && s <= weekLater;
+    const eventDateJST = new Date(new Date(e.scheduledStartTimestamp).toLocaleString("en-US", {
+      timeZone: "Asia/Tokyo"
+    }));
+    return eventDateJST >= todayJST && eventDateJST <= weekLaterJST;
   });
 }
 
