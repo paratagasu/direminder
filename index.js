@@ -93,7 +93,9 @@ async function sendMorningSummary() {
 
   let msg = '📅 本日のイベント一覧:\n';
   for (const e of events.values()) {
-    const time     = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP');
+    const time = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', {
+  timeZone: 'Asia/Tokyo'
+});
     const host     = e.creator?.username || '不明';
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
@@ -114,17 +116,30 @@ async function scheduleEventReminders() {
 
   for (const offset of db.data.reminderOffsets) {
     for (const e of events.values()) {
-      const target   = new Date(e.scheduledStartTimestamp - offset * 60000);
-      const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
+      // JSTでイベント開始時刻を取得
+      const startJST = new Date(new Date(e.scheduledStartTimestamp).toLocaleString("en-US", {
+        timeZone: "Asia/Tokyo"
+      }));
+
+      // JSTでリマインド時刻を逆算
+      const target = new Date(startJST.getTime() - offset * 60000);
+
+      // cron式をJSTで構成
+      const expr = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
+
       const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
       const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
 
       registerCron(expr, async () => {
-        await channel.send(
-          `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
-          `📍 チャンネル: <${chanUrl}>\n` +
-          `🔗 イベント:   <${eventUrl}>`
-        );
+        try {
+          await channel.send(
+            `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
+            `📍 チャンネル: <${chanUrl}>\n` +
+            `🔗 イベント:   <${eventUrl}>`
+          );
+        } catch (err) {
+          console.error(`❌ リマインド送信失敗: ${e.name}`, err);
+        }
       }, `event '${e.name}' -${offset}m`);
     }
   }
