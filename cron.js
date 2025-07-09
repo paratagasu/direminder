@@ -1,10 +1,11 @@
 import cron from "node-cron";
 import fetch from "node-fetch"; // Node.js 18未満対策
-import { PORT } from "./config.js";
 
+const PORT = process.env.PORT || 3000;
 const HEALTH_CHECK_URL =
   process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
 
+// 10分ごとにヘルスチェック
 export function startHealthCheckCron() {
   cron.schedule("*/10 * * * *", async () => {
     const now = new Date().toLocaleString("ja-JP");
