@@ -4,7 +4,6 @@ import {serve} from '@hono/node-server';
 import healthCheckServer from './server.js';
 import {startHealthCheckCron} from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
-import express from 'express';
 import cron from 'node-cron';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
@@ -17,12 +16,6 @@ if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
   process.exit(1);
 }
-
-// Express アプリ（スリープ防止用）
-const app = express();
-app.get('/', (req, res) => res.send('Bot is alive!'));
-const port = PORT || 3000;
-app.listen(port, () => console.log(`🌐 Web server running on port ${port}`));
 
 // デフォルト設定
 const defaultData = {
