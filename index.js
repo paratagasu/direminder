@@ -53,10 +53,17 @@ function clearAllJobs() {
 // イベント取得
 async function fetchTodaysEvents(guild) {
   const all = await guild.scheduledEvents.fetch();
-  const today = new Date().toISOString().slice(0, 10);
-  return all.filter(e =>
-    new Date(e.scheduledStartTimestamp).toISOString().startsWith(today)
-  );
+
+  const todayJST = new Date().toLocaleDateString("ja-JP", {
+    timeZone: "Asia/Tokyo"
+  });
+
+  return all.filter(e => {
+    const eventDateJST = new Date(e.scheduledStartTimestamp).toLocaleDateString("ja-JP", {
+      timeZone: "Asia/Tokyo"
+    });
+    return eventDateJST === todayJST;
+  });
 }
 async function fetchWeekEvents(guild) {
   const now = new Date();
