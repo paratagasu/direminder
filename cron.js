@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import fetch from "node-fetch"; // Node.js 18未満対策
-import { PORT } from "./config";
+import { PORT } from "./config.js";
 
 const HEALTH_CHECK_URL =
   process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
