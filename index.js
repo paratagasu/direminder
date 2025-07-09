@@ -240,10 +240,13 @@ client.on('interactionCreate', async interaction => {
     }
 
     case 'week-events': {
+      await interaction.deferReply(); // ← 追加！
+
       const guild  = await client.guilds.fetch(GUILD_ID);
       const events = await fetchWeekEvents(guild);
+
       if (events.size === 0) {
-        return interaction.reply('📭 今後1週間のイベントはありません');
+        return interaction.editReply('📭 今後1週間のイベントはありません'); // ← reply → editReply に変更！
       }
 
       let msg = '📆 今後1週間のイベント一覧:\n';
@@ -254,14 +257,15 @@ client.on('interactionCreate', async interaction => {
           month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit'
         });
-        const host    = e.creator?.username || '不明';
+        const host = e.creator?.username || '不明';
         const chanUrl = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
-        const eventUrl= `https://discord.com/events/${GUILD_ID}/${e.id}`;
+        const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
         msg += `• ${e.name} / ${ts} / ${host}\n` +
                `  📍 チャンネル: <${chanUrl}>\n` +
                `  🔗 イベント:   <${eventUrl}>\n`;
       }
-      return interaction.reply(msg);
+
+      return interaction.editReply(msg); // ← ここも editReply に変更！
     }
   }
 });
