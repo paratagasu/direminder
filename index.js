@@ -1,5 +1,8 @@
 // index.js
 
+import {serve} from "@hono/node-server";
+import healthCheckServer from "./server";
+import {startHealthCheckCron} from "./cron";
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import express from 'express';
 import cron from 'node-cron';
@@ -272,3 +275,10 @@ client.on('interactionCreate', async interaction => {
 
 // Discord Bot ログイン
 client.login(DISCORD_TOKEN);
+
+//Koyeb用のヘルスチェックサーバーを起動
+serve({
+  fetch: healthCheckServer.fetch,
+  port: 3000
+});
+startHealthCheckCron();
