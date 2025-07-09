@@ -1,7 +1,7 @@
 // index.js
 
 import {serve} from '@hono/node-server';
-import healthCheckServer from './server';
+import healthCheckServer from './server.js';
 import {startHealthCheckCron} from './cron';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import express from 'express';
