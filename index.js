@@ -108,6 +108,22 @@ async function sendMorningSummary(force = false) {
   lastReminderMessageId = reminder.id;
   reminderDate = new Date().toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
 }
+function scheduleDailyReminders() {
+  const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':');
+  registerCron(`0 ${m} ${h} * * *`, () => sendMorningSummary(false), 'morning summary');
+  registerCron('0 0 * * *', scheduleEventReminders, 'reschedule events');
+}
+
+async function scheduleEventReminders() {
+  // この関数の中身は、後から追加予定なら空でもOK！
+  console.log('🕒 scheduleEventReminders が呼び出されました（未実装）');
+}
+
+function bootstrapSchedules() {
+  clearAllJobs();
+  scheduleDailyReminders();
+  scheduleEventReminders();
+}
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
