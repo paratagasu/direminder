@@ -8,7 +8,7 @@ import { JSONFile } from 'lowdb/node';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-const { DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID, PORT } = process.env;
+const { DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID } = process.env;
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
   process.exit(1);
@@ -32,13 +32,15 @@ let lastReminderMessageId = null;
 let reminderDate = null;
 
 function registerCron(expr, jobFn, desc) {
-  console.log(`⏰ Register cron [${expr}] for ${desc}`);
-  const job = cron.schedule(expr, async () => {
-    console.log(`▶ Trigger cron [${expr}] for ${desc} at ${new Date().toLocaleString('ja-JP')}`);
-    try { await jobFn(); } catch (e) { console.error(`❌ Job error (${desc}):`, e); }
-  }, { timezone: 'Asia/Tokyo' });
+  const parts = expr.split(' ');
+  if (parts.some(p => isNaN(parseInt(p)))) {
+    console.warn(`❌ 無効な cron 式: ${expr} (${desc})`);
+    return;
+  }
+  const job = cron.schedule(expr, jobFn, { timezone: 'Asia/Tokyo' });
   jobs.push(job);
 }
+
 function clearAllJobs() {
   jobs.forEach(j => j.stop());
   jobs.length = 0;
@@ -62,14 +64,16 @@ async function clearAttendanceRole(role) {
   for (const member of members.values()) {
     await member.roles.remove(role);
   }
-  console.log(`🚫 出席予定者ロールを全員から解除しました`);
+  console.log('🚫 出席予定者ロールを全員から解除しました');
 }
 
 async function fetchTodaysEvents(guild) {
   const all = await guild.scheduledEvents.fetch();
   const todayJST = new Date().toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
   return all.filter(e => {
-    const eventDateJST = new Date(e.scheduledStartTimestamp).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
+    const ts = e.scheduledStartTimestamp;
+    if (!ts || isNaN(new Date(ts).getTime())) return false;
+    const eventDateJST = new Date(ts).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
     return eventDateJST === todayJST;
   });
 }
@@ -83,7 +87,6 @@ async function sendMorningSummary(force = false) {
 
   if (events.size === 0) {
     await channel.send('📭 本日のイベントはありません。');
-    console.log('📭 本日のイベントはありません（通知済み）');
     return;
   }
 
@@ -98,53 +101,13 @@ async function sendMorningSummary(force = false) {
            `  🔗 イベント:   <${eventUrl}>\n`;
   }
 
-  const reminder = await channel.send({ content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！' });
+  const reminder = await channel.send(msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！');
   await reminder.react('✅');
   await reminder.react('❌');
 
   lastReminderMessageId = reminder.id;
   reminderDate = new Date().toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
 }
-function scheduleDailyReminders() {
-  const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':');
-  registerCron(`0 ${m} ${h} * * *`, () => sendMorningSummary(false), 'morning summary');
-  registerCron('0 0 * * *', scheduleEventReminders, 'reschedule events');
-}
-
-function bootstrapSchedules() {
-  clearAllJobs();
-  scheduleDailyReminders();
-  scheduleEventReminders();
-}
-
-async function scheduleEventReminders() {
-  const guild   = await client.guilds.fetch(GUILD_ID);
-  const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
-  const events  = await fetchTodaysEvents(guild);
-  const role    = await getOrCreateAttendanceRole(guild);
-
-  const offsets = [db.data.firstOffset, db.data.secondOffset, 0]; // ← 開始時刻含む
-  for (const offset of offsets) {
-    for (const e of events.values()) {
-      const startJST = new Date(new Date(e.scheduledStartTimestamp).toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
-      const target = new Date(startJST.getTime() - offset * 60000);
-      const expr = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
-      const mention = `<@&${role.id}>`;
-
-      const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
-      const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-
-      registerCron(expr, async () => {
-        await channel.send(
-          `${mention}\n⏰ **${offset === 0 ? '開始' : `${offset}分前`}リマインド** 「${e.name}」\n` +
-          `📍 チャンネル: <${chanUrl}>\n` +
-          `🔗 イベント:   <${eventUrl}>`
-        );
-      }, `event '${e.name}' -${offset}m`);
-    }
-  }
-}
-
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
@@ -163,36 +126,22 @@ client.once('ready', async () => {
 
   const commands = [
     new SlashCommandBuilder().setName('ping').setDescription('Bot疎通チェック'),
-    new SlashCommandBuilder()
-      .setName('set-morning-time')
-      .setDescription('朝リマインドの時刻を設定')
+    new SlashCommandBuilder().setName('set-morning-time').setDescription('朝リマインドの時刻を設定')
       .addStringOption(opt => opt.setName('time').setDescription('HH:MM形式').setRequired(true)),
-    new SlashCommandBuilder()
-      .setName('set-first-reminder')
-      .setDescription('1回目のイベントリマインドを設定')
+    new SlashCommandBuilder().setName('set-first-reminder').setDescription('1回目のイベントリマインドを設定')
       .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
-    new SlashCommandBuilder()
-      .setName('set-second-reminder')
-      .setDescription('2回目のイベントリマインドを設定')
+    new SlashCommandBuilder().setName('set-second-reminder').setDescription('2回目のイベントリマインドを設定')
       .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
-    new SlashCommandBuilder()
-      .setName('week-events')
-      .setDescription('直近1週間のイベント一覧を表示'),
-    new SlashCommandBuilder()
-      .setName('force-remind')
-      .setDescription('今すぐ朝リマインドを強制発動する')
+    new SlashCommandBuilder().setName('week-events').setDescription('直近1週間のイベント一覧を表示'),
+    new SlashCommandBuilder().setName('force-remind').setDescription('朝リマインドを即時発動する')
   ].map(cmd => cmd.toJSON());
 
-  await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
+  await new REST({ version: '10' })
+    .setToken(DISCORD_TOKEN)
     .put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
 
   console.log('✅ Slash commands registered');
   bootstrapSchedules();
-
-  cron.schedule('* * * * *', () => {
-    console.log('🔄 Polling & re-bootstrapping schedules');
-    bootstrapSchedules();
-  }, { timezone: 'Asia/Tokyo' });
 });
 
 client.on('interactionCreate', async interaction => {
@@ -200,7 +149,7 @@ client.on('interactionCreate', async interaction => {
 
   switch (interaction.commandName) {
     case 'ping':
-      return interaction.reply('Pong!');
+      return interaction.reply('🏓 Pong!');
 
     case 'set-morning-time': {
       const time = interaction.options.getString('time');
@@ -228,17 +177,25 @@ client.on('interactionCreate', async interaction => {
 
     case 'week-events': {
       await interaction.deferReply();
-      const guild  = await client.guilds.fetch(GUILD_ID);
-      const events = await fetchWeekEvents(guild);
-      if (events.size === 0) return interaction.editReply('📭 今後1週間のイベントはありません');
+      const guild = await client.guilds.fetch(GUILD_ID);
+      const events = await guild.scheduledEvents.fetch();
+      const todayJST = new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" });
+      const todayDate = new Date(todayJST);
+      const weekLater = new Date(todayDate.getTime() + 7 * 86400000);
+
+      const filtered = events.filter(e => {
+        const start = new Date(new Date(e.scheduledStartTimestamp).toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+        return start >= todayDate && start <= weekLater;
+      });
+
+      if (filtered.size === 0)
+        return interaction.editReply('📭 今後1週間のイベントはありません');
 
       let msg = '📆 今後1週間のイベント一覧:\n';
-      for (const e of events.values()) {
+      for (const e of filtered.values()) {
         const ts = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
           timeZone: 'Asia/Tokyo',
-          weekday: 'short', year: 'numeric',
-          month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit'
+          weekday: 'short', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
         });
         const host = e.creator?.username || '不明';
         const chanUrl = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
@@ -256,10 +213,9 @@ client.on('interactionCreate', async interaction => {
         await sendMorningSummary(true);
         await interaction.editReply('✅ 朝リマインドを強制発動しました');
       } catch (e) {
-        await interaction.editReply('❌ 実行中にエラーが発生しました');
+        await interaction.editReply('❌ 実行エラーが発生しました');
         console.error(e);
       }
-      break;
     }
   }
 });
@@ -274,7 +230,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
-    const role  = await getOrCreateAttendanceRole(guild);
+    const role = await getOrCreateAttendanceRole(guild);
     const member = await guild.members.fetch(user.id);
     await member.roles.add(role);
     console.log(`🎟 ${user.username} に出席予定者ロールを付与しました`);
@@ -284,6 +240,5 @@ client.on('messageReactionAdd', async (reaction, user) => {
 });
 
 client.login(DISCORD_TOKEN);
-
 serve({ fetch: healthCheckServer.fetch, port: 3000 });
 startHealthCheckCron();
