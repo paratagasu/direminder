@@ -134,6 +134,7 @@ function scheduleDailyReminders() {
 }
 
 async function scheduleEventReminders() {
+  clearAllJobs(); // ← ここが重要！
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events = await fetchTodaysEvents(guild);
