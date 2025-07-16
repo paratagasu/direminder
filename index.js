@@ -206,11 +206,18 @@ function scheduleNonAttendanceCheck(event) {
     console.log(`🚀 未参加チェック実行: ${event.name} at ${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}`);
     try {
       const guild = await client.guilds.fetch(GUILD_ID);
-      await guild.members.fetch(); // ✅ これが重要！
-      const role = await getOrCreateAttendanceRole(guild);
-      const channel = await guild.channels.fetch(event.channelId);
+      console.log(`✅ guild取得成功`);
 
-      const voiceTypes = [2, 13]; // VC / ステージ
+      await guild.members.fetch();
+      console.log(`✅ メンバー一覧取得成功`);
+
+      const role = await getOrCreateAttendanceRole(guild);
+      console.log(`✅ ロール取得成功: ${role.name} (${role.id})`);
+
+      const channel = await guild.channels.fetch(event.channelId);
+      console.log(`✅ チャンネル取得成功: ${channel.name} (${channel.id})`);
+
+      const voiceTypes = [2, 13];
       if (!channel || !voiceTypes.includes(channel.type)) {
         console.warn(`⚠️ [${event.name}] VCではないため未参加チェックスキップ`);
         return;
