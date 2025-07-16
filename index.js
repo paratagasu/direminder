@@ -99,7 +99,7 @@ async function sendMorningSummary(force = false) {
     return;
   }
 
-  let msg = `${force ? '' : '@everyone'}\n**📅 本日のイベント一覧**:\n`;
+  let msg = `${force ? '' : '@everyone\n'}**📅 本日のイベント一覧**:\n`;
   for (const e of events.values()) {
     const time = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' });
     const host = e.creator?.username || '不明';
@@ -108,9 +108,13 @@ async function sendMorningSummary(force = false) {
     msg += `• ${e.name} / ${time} / ${host}\n` +
            `  📍 チャンネル: <${chanUrl}>\n` +
            `  🔗 イベント:   <${eventUrl}>\n`;
-  }  
+  }
 
-  const reminder = await channel.send(msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！');
+  const reminder = await channel.send({
+    content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！',
+    allowedMentions: { parse: ['everyone'] } // ← @everyone の通知を有効化！
+  });
+
   await reminder.react('✅');
   await reminder.react('❌');
 
