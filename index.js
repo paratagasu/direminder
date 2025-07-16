@@ -34,14 +34,13 @@ let reminderDate = null;
 
 function registerCron(expr, jobFn, desc) {
   const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 6) {
-    console.warn(`❌ フィールド数が6ではありません: ${expr} (${desc})`);
+  if (parts.length !== 5) {
+    console.warn(`❌ フィールド数が5ではありません: ${expr} (${desc})`);
     return;
   }
 
   const cronFieldRegex = /^(\*|\d+|\d+\/\d+|\d+\-\d+|\d+(,\d+)+)$/;
-
-  const valid = parts.every(p => p === '*' || /^[\d\/\-,]+$/.test(p));
+  const valid = parts.every(p => p === '*' || cronFieldRegex.test(p));
   if (!valid) {
     console.warn(`❌ 無効な cron 式フィールド検出: ${expr} (${desc})`);
     return;
@@ -120,10 +119,12 @@ async function sendMorningSummary(force = false) {
 }
 function scheduleDailyReminders() {
   const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':').map(v => parseInt(v));
-  const morningExpr = `0 ${m} ${h} * * *`; // ← 数値として構築
-
+  // 朝リマインド
+  const morningExpr = `${m} ${h} * * *`; // ← 秒フィールド（0）を削除
   registerCron(morningExpr, () => sendMorningSummary(false), '朝のまとめ');
-  registerCron('0 0 * * *', scheduleEventReminders, 'イベントの再スケジュール');
+
+// イベント再スケジュール
+  registerCron('0 * * * *', scheduleEventReminders, 'イベントの再スケジュール'); // 毎時0分など
 }
 
 async function scheduleEventReminders() {
