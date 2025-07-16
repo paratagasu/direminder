@@ -277,6 +277,22 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply(`✅ 朝リマインドを **${time}** に設定しました`);
     }
 
+    case 'set-monitor-delay': {
+  const minutes = interaction.options.getInteger('minutes');
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 180) {
+    return interaction.reply({
+      content: '❌ 有効な分数（1〜180）を指定してください',
+      ephemeral: true
+    });
+  }
+
+  db.data.monitorDelay = minutes;
+  await db.write();
+  bootstrapSchedules();
+
+  return interaction.reply(`✅ 監視遅延を **${minutes}分** に設定しました`);
+}
+
     case 'set-first-reminder': {
       const min = interaction.options.getInteger('minutes');
       db.data.firstOffset = min;
