@@ -203,6 +203,7 @@ function scheduleNonAttendanceCheck(event) {
   console.log(`📌 未参加チェック登録: ${expr} (${event.name})`);
 
   registerCron(expr, async () => {
+    console.log(`🚀 未参加チェック実行: ${event.name} at ${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}`);
     try {
       const guild = await client.guilds.fetch(GUILD_ID);
       const role = await getOrCreateAttendanceRole(guild);
