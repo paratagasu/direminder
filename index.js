@@ -130,7 +130,7 @@ function scheduleDailyReminders() {
   registerCron(morningExpr, () => sendMorningSummary(false), '朝のまとめ');
 
 // イベント再スケジュール
-  registerCron('0 * * * *', scheduleEventReminders, 'イベントの再スケジュール'); // 毎時0分など
+  registerCron('* * * * *', scheduleEventReminders, 'イベントの再スケジュール'); // 毎時0分など
 }
 
 async function scheduleEventReminders() {
