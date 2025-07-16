@@ -208,11 +208,12 @@ function scheduleNonAttendanceCheck(event) {
       const guild = await client.guilds.fetch(GUILD_ID);
       console.log(`✅ guild取得成功`);
 
-      await guild.members.fetch();
-      console.log(`✅ メンバー一覧取得成功`);
+      // ❌ 削除：await guild.members.fetch();
+      // ✅ 代わりにロールメンバーを直接取得（キャッシュベース）
 
       const role = await getOrCreateAttendanceRole(guild);
-      console.log(`✅ ロール取得成功: ${role.name} (${role.id})`);
+      const roleMembers = Array.from(role.members.values());
+      console.log(`✅ ロール取得成功: ${role.name} (${role.id}) → メンバー数: ${roleMembers.length}`);
 
       const channel = await guild.channels.fetch(event.channelId);
       console.log(`✅ チャンネル取得成功: ${channel.name} (${channel.id})`);
@@ -224,8 +225,7 @@ function scheduleNonAttendanceCheck(event) {
       }
 
       const voiceMembers = Array.from(channel.members.keys());
-      const roleMembers = Array.from(role.members.keys());
-      const missingIds = roleMembers.filter(id => !voiceMembers.includes(id));
+      const missingIds = roleMembers.map(m => m.id).filter(id => !voiceMembers.includes(id));
 
       console.log(`🕵️ チェック結果: VC=${voiceMembers.length}, ロール=${roleMembers.length}, 未参加=${missingIds.length}`);
 
@@ -241,9 +241,10 @@ function scheduleNonAttendanceCheck(event) {
       }
     } catch (err) {
       console.error(`❌ 未参加チェックエラー: ${err.message}`);
-    }
-  }, `event '${event.name}' 参加未確認`);
-}
+      }
+
+    }, `event '${event.name}' 参加未確認`);
+  }
 
 function bootstrapSchedules() {
   clearAllJobs();
