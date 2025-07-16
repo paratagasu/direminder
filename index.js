@@ -17,7 +17,8 @@ if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
 const defaultData = {
   morningTime: '07:00',
   firstOffset: 60,
-  secondOffset: 15
+  secondOffset: 15,
+ enableStartRemind: true
 };
 
 const adapter = new JSONFile('settings.json');
@@ -109,14 +110,54 @@ async function sendMorningSummary(force = false) {
   reminderDate = new Date().toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
 }
 function scheduleDailyReminders() {
-  const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':');
-  registerCron(`0 ${m} ${h} * * *`, () => sendMorningSummary(false), 'morning summary');
-  registerCron('0 0 * * *', scheduleEventReminders, 'reschedule events');
+  const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':').map(v => parseInt(v));
+  const morningExpr = `0 ${m} ${h} * * *`; // ← 数値として構築
+
+  registerCron(morningExpr, () => sendMorningSummary(false), '朝のまとめ');
+  registerCron('0 0 * * *', scheduleEventReminders, 'イベントの再スケジュール');
 }
 
 async function scheduleEventReminders() {
-  // この関数の中身は、後から追加予定なら空でもOK！
-  console.log('🕒 scheduleEventReminders が呼び出されました（未実装）');
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
+  const events = await fetchTodaysEvents(guild);
+  const role = await getOrCreateAttendanceRole(guild);
+
+  // 通知対象オフセットを条件で構築（開始時通知のON/OFF制御）
+  const offsets = [
+    db.data.firstOffset,
+    db.data.secondOffset,
+    ...(db.data.enableStartRemind ? [0] : [])
+  ];
+
+  for (const offset of offsets) {
+    for (const e of events.values()) {
+      const ts = e.scheduledStartTimestamp;
+      if (!ts || isNaN(new Date(ts).getTime())) continue;
+
+      const startJST = new Date(new Date(ts).toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+      const target = new Date(startJST.getTime() - offset * 60000);
+      if (isNaN(target.getTime())) continue;
+
+      const min = target.getMinutes();
+      const hour = target.getHours();
+      const day = target.getDate();
+      const mon = target.getMonth() + 1;
+      if ([min, hour, day, mon].some(n => isNaN(n))) continue;
+
+      const expr = `${min} ${hour} ${day} ${mon} *`;
+      const mention = `<@&${role.id}>`;
+      const chanUrl = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+      const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
+      const timing = offset === 0 ? '開始' : `${offset}分前`;
+
+      registerCron(expr, async () => {
+        await channel.send(
+          `${mention}\n⏰ **${timing}リマインド**「${e.name}」\n📍 <${chanUrl}>\n🔗 <${eventUrl}>`
+        );
+      }, `event '${e.name}' -${offset}m`);
+    }
+  }
 }
 
 function bootstrapSchedules() {
@@ -149,7 +190,8 @@ client.once('ready', async () => {
     new SlashCommandBuilder().setName('set-second-reminder').setDescription('2回目のイベントリマインドを設定')
       .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
     new SlashCommandBuilder().setName('week-events').setDescription('直近1週間のイベント一覧を表示'),
-    new SlashCommandBuilder().setName('force-remind').setDescription('朝リマインドを即時発動する')
+    new SlashCommandBuilder().setName('force-remind').setDescription('朝リマインドを即時発動する'),
+    new SlashCommandBuilder().setName('toggle-start-remind').setDescription('イベント開始時の通知をオン／オフ切り替える')
   ].map(cmd => cmd.toJSON());
 
   await new REST({ version: '10' })
@@ -232,6 +274,15 @@ client.on('interactionCreate', async interaction => {
         await interaction.editReply('❌ 実行エラーが発生しました');
         console.error(e);
       }
+    }
+
+    case 'toggle-start-remind': {
+      db.data.enableStartRemind = !db.data.enableStartRemind;
+      await db.write();
+      bootstrapSchedules();
+       return interaction.reply(
+        `🕒 開始時通知を ${db.data.enableStartRemind ? '**有効化**' : '**無効化**'} しました`
+      );
     }
   }
 });
