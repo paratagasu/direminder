@@ -34,6 +34,7 @@ let lastReminderMessageId = null;
 let reminderDate = null;
 
 function registerCron(expr, jobFn, desc) {
+  console.log(`📌 登録予定: ${expr} (${desc})`);
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) {
     console.warn(`❌ フィールド数が5ではありません: ${expr} (${desc})`);
