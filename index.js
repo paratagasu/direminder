@@ -33,7 +33,7 @@ let lastReminderMessageId = null;
 let reminderDate = null;
 
 function registerCron(expr, jobFn, desc) {
-  const parts = expr.split(' ').map(p => parseInt(p));
+  const parts = expr.split(' ').map(p => parseInt(p)); // ← ここを必ず数値変換に
   if (parts.some(p => isNaN(p))) {
     console.warn(`❌ 無効な cron 式: ${expr} (${desc})`);
     return;
