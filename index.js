@@ -18,7 +18,8 @@ const defaultData = {
   morningTime: '07:00',
   firstOffset: 60,      // ← 必須
   secondOffset: 15,     // ← 必須
-  enableStartRemind: true
+  enableStartRemind: true,
+  monitorDelay: 5
 };
 
 const adapter = new JSONFile('settings.json');
@@ -137,7 +138,6 @@ async function scheduleEventReminders() {
   const events = await fetchTodaysEvents(guild);
   const role = await getOrCreateAttendanceRole(guild);
 
-  // 通知対象オフセットを条件で構築（開始時通知のON/OFF制御）
   const offsets = [
     db.data.firstOffset,
     db.data.secondOffset,
@@ -172,6 +172,47 @@ async function scheduleEventReminders() {
       }, `event '${e.name}' -${offset}m`);
     }
   }
+
+  // ✅ イベント開始後、未参加者チェック予約
+  for (const e of events.values()) {
+    scheduleNonAttendanceCheck(e);
+  }
+}
+
+function scheduleNonAttendanceCheck(event) {
+  const ts = event.scheduledStartTimestamp;
+  const delayMs = (db.data.monitorDelay || 5) * 60000;
+
+  const checkTime = new Date(ts + delayMs);
+  const min = checkTime.getMinutes();
+  const hour = checkTime.getHours();
+  const day = checkTime.getDate();
+  const mon = checkTime.getMonth() + 1;
+
+  const expr = `${min} ${hour} ${day} ${mon} *`;
+
+  registerCron(expr, async () => {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const role = await getOrCreateAttendanceRole(guild);
+    const channel = await guild.channels.fetch(event.channelId);
+
+    // ✅ ボイス or ステージチャンネルでなければスキップ
+    const voiceTypes = [2, 13]; // 2: Voice, 13: Stage
+    if (!channel || !voiceTypes.includes(channel.type)) {
+      console.warn(`⚠️ [${event.name}] チャンネルがVCではないため未参加チェックをスキップ`);
+      return;
+    }
+
+    const voiceMembers = Array.from(channel.members.keys());
+    const missing = role.members.filter(member => !voiceMembers.includes(member.id));
+
+    if (missing.size > 0) {
+      const mentionList = Array.from(missing.values()).map(m => `<@${m.id}>`).join('\n');
+      await channel.send(
+        `📢 以下の出席予定者がボイスチャンネルに未参加です:\n${mentionList}`
+      );
+    }
+  }, `event '${event.name}' 参加未確認`);
 }
 
 function bootstrapSchedules() {
@@ -205,7 +246,9 @@ client.once('ready', async () => {
       .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
     new SlashCommandBuilder().setName('week-events').setDescription('直近1週間のイベント一覧を表示'),
     new SlashCommandBuilder().setName('force-remind').setDescription('朝リマインドを即時発動する'),
-    new SlashCommandBuilder().setName('toggle-start-remind').setDescription('イベント開始時の通知をオン／オフ切り替える')
+    new SlashCommandBuilder().setName('toggle-start-remind').setDescription('イベント開始時の通知をオン／オフ切り替える'),
+    new SlashCommandBuilder().setName('set-monitor-delay').setDescription('イベント監視遅延（分）を設定')
+    .addIntegerOption(opt => opt.setName('minutes').setDescription('開始後何分で接続確認').setRequired(true))
   ].map(cmd => cmd.toJSON());
 
   await new REST({ version: '10' })
