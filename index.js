@@ -190,7 +190,8 @@ function scheduleNonAttendanceCheck(event) {
   }
 
   const delayMs = (db.data.monitorDelay || 5) * 60000;
-  const checkTime = new Date(ts + delayMs);
+  const startJST = new Date(new Date(ts).toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+  const checkTime = new Date(startJST.getTime() + delayMs);
 
   const min = checkTime.getMinutes();
   const hour = checkTime.getHours();
