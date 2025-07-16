@@ -33,11 +33,20 @@ let lastReminderMessageId = null;
 let reminderDate = null;
 
 function registerCron(expr, jobFn, desc) {
-  const parts = expr.split(' ').map(p => parseInt(p, 10));
-  if (parts.some(p => isNaN(p))) {
-    console.warn(`❌ 無効な cron 式: ${expr} (${desc})`);
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 6) {
+    console.warn(`❌ フィールド数が6ではありません: ${expr} (${desc})`);
     return;
   }
+
+  const cronFieldRegex = /^(\*|\d+|\d+\/\d+|\d+\-\d+|\d+(,\d+)+)$/;
+
+  const valid = parts.every(p => p === '*' || /^[\d\/\-,]+$/.test(p));
+  if (!valid) {
+    console.warn(`❌ 無効な cron 式フィールド検出: ${expr} (${desc})`);
+    return;
+  }
+
   const job = cron.schedule(expr, jobFn, { timezone: 'Asia/Tokyo' });
   jobs.push(job);
 }
