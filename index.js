@@ -16,9 +16,9 @@ if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
 
 const defaultData = {
   morningTime: '07:00',
-  firstOffset: 60,
-  secondOffset: 15,
- enableStartRemind: true
+  firstOffset: 60,      // ← 必須
+  secondOffset: 15,     // ← 必須
+  enableStartRemind: true
 };
 
 const adapter = new JSONFile('settings.json');
@@ -33,8 +33,8 @@ let lastReminderMessageId = null;
 let reminderDate = null;
 
 function registerCron(expr, jobFn, desc) {
-  const parts = expr.split(' ');
-  if (parts.some(p => isNaN(parseInt(p)))) {
+  const parts = expr.split(' ').map(p => parseInt(p));
+  if (parts.some(p => isNaN(p))) {
     console.warn(`❌ 無効な cron 式: ${expr} (${desc})`);
     return;
   }
@@ -265,14 +265,16 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply(msg);
     }
 
-    case 'force-remind': {
-      await interaction.deferReply();
+    await interaction.deferReply();
       try {
         await sendMorningSummary(true);
         await interaction.editReply('✅ 朝リマインドを強制発動しました');
       } catch (e) {
+     console.error(e);
+      if (interaction.replied) {
+        await interaction.followUp('❌ 実行エラーが発生しました');
+      } else {
         await interaction.editReply('❌ 実行エラーが発生しました');
-        console.error(e);
       }
     }
 
