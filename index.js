@@ -166,6 +166,8 @@ async function scheduleEventReminders() {
       const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
       const timing = offset === 0 ? '開始' : `${offset}分前`;
 
+      console.log(`📌 リマインド登録予定: offset=${offset} → ${expr} (${e.name})`);
+
       registerCron(expr, async () => {
         await channel.send(
           `${mention}\n⏰ **${timing}リマインド**「${e.name}」\n📍 <${chanUrl}>\n🔗 <${eventUrl}>`
