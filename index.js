@@ -184,36 +184,52 @@ async function scheduleEventReminders() {
 
 function scheduleNonAttendanceCheck(event) {
   const ts = event.scheduledStartTimestamp;
-  const delayMs = (db.data.monitorDelay || 5) * 60000;
+  if (!ts || isNaN(ts)) {
+    console.warn(`⚠️ [${event.name}] 開始時刻が不正なため未参加チェックスキップ`);
+    return;
+  }
 
+  const delayMs = (db.data.monitorDelay || 5) * 60000;
   const checkTime = new Date(ts + delayMs);
+
   const min = checkTime.getMinutes();
   const hour = checkTime.getHours();
   const day = checkTime.getDate();
   const mon = checkTime.getMonth() + 1;
 
   const expr = `${min} ${hour} ${day} ${mon} *`;
+  console.log(`📌 未参加チェック登録: ${expr} (${event.name})`);
 
   registerCron(expr, async () => {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const role = await getOrCreateAttendanceRole(guild);
-    const channel = await guild.channels.fetch(event.channelId);
+    try {
+      const guild = await client.guilds.fetch(GUILD_ID);
+      const role = await getOrCreateAttendanceRole(guild);
+      const channel = await guild.channels.fetch(event.channelId);
 
-    // ✅ ボイス or ステージチャンネルでなければスキップ
-    const voiceTypes = [2, 13]; // 2: Voice, 13: Stage
-    if (!channel || !voiceTypes.includes(channel.type)) {
-      console.warn(`⚠️ [${event.name}] チャンネルがVCではないため未参加チェックをスキップ`);
-      return;
-    }
+      const voiceTypes = [2, 13]; // VC / ステージ
+      if (!channel || !voiceTypes.includes(channel.type)) {
+        console.warn(`⚠️ [${event.name}] VCではないため未参加チェックスキップ`);
+        return;
+      }
 
-    const voiceMembers = Array.from(channel.members.keys());
-    const missing = role.members.filter(member => !voiceMembers.includes(member.id));
+      const voiceMembers = Array.from(channel.members.keys());
+      const roleMembers = Array.from(role.members.keys());
+      const missingIds = roleMembers.filter(id => !voiceMembers.includes(id));
 
-    if (missing.size > 0) {
-      const mentionList = Array.from(missing.values()).map(m => `<@${m.id}>`).join('\n');
-      await channel.send(
-        `📢 以下の出席予定者がボイスチャンネルに未参加です:\n${mentionList}`
-      );
+      console.log(`🕵️ チェック結果: VC=${voiceMembers.length}, ロール=${roleMembers.length}, 未参加=${missingIds.length}`);
+
+      if (missingIds.length > 0) {
+        const mentionList = missingIds.map(id => `<@${id}>`).join('\n');
+        await channel.send({
+          content: `📢 以下の出席予定者がボイスチャンネルに未参加です:\n${mentionList}`,
+          allowedMentions: { users: missingIds }
+        });
+        console.log(`✅ 未参加メンション通知送信完了`);
+      } else {
+        console.log(`✅ 全員参加済み。通知不要 (${event.name})`);
+      }
+    } catch (err) {
+      console.error(`❌ 未参加チェックエラー: ${err.message}`);
     }
   }, `event '${event.name}' 参加未確認`);
 }
