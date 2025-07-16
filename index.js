@@ -275,24 +275,27 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply(msg);
     }
 
-    await interaction.deferReply();
+    case 'force-remind': {
+      await interaction.deferReply();
       try {
         await sendMorningSummary(true);
         await interaction.editReply('✅ 朝リマインドを強制発動しました');
       } catch (e) {
-     console.error(e);
-      if (interaction.replied) {
-        await interaction.followUp('❌ 実行エラーが発生しました');
-      } else {
-        await interaction.editReply('❌ 実行エラーが発生しました');
+        console.error(e);
+        if (interaction.replied) {
+          await interaction.followUp('❌ 実行エラーが発生しました');
+        } else {
+          await interaction.editReply('❌ 実行エラーが発生しました');
+        }
       }
+      break;
     }
 
     case 'toggle-start-remind': {
       db.data.enableStartRemind = !db.data.enableStartRemind;
       await db.write();
       bootstrapSchedules();
-       return interaction.reply(
+      return interaction.reply(
         `🕒 開始時通知を ${db.data.enableStartRemind ? '**有効化**' : '**無効化**'} しました`
       );
     }
