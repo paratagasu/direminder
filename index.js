@@ -4,11 +4,6 @@ import { startHealthCheckCron } from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, Partials } from 'discord.js';
 import { schedule } from 'node-cron'; // ✅ named importで確実に本物を使う
 
-const job = schedule('*/1 * * * *', () => {
-  console.log('✅ テストジョブ発火');
-});
-job.start();
-
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import * as dotenv from 'dotenv';
@@ -17,7 +12,9 @@ dotenv.config();
 // === ジョブ管理用のMap
 const cronJobs = new Map();
 
-import cronParser from 'cron-parser';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const cronParser = require('cron-parser');
 const { parseExpression } = cronParser;
 
 function logNextRun(expr, name) {
