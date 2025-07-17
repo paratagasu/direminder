@@ -3,5 +3,8 @@
   "firstOffset": 60,
   "secondOffset": 15,
   "startAnnouncement": true,
-  "absenceThreshold": 3
+  "absenceThreshold": 3,
+  "dependencies": {
+    "@hono/node-server": "^1.16.0"
+  }
 }
