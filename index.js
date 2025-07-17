@@ -3,6 +3,17 @@ import healthCheckServer from './server.js';
 import { startHealthCheckCron } from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, Partials } from 'discord.js';
 import { schedule } from 'node-cron'; // ✅ named importで確実に本物を使う
+import parser from 'cron-parser';
+
+function logNextRun(expr, name) {
+  try {
+    const interval = parser.parseExpression(expr, { timezone: 'Asia/Tokyo' });
+    const next = interval.next().toString();
+    console.log(`📅 ${name} の次回実行予定: ${next}`);
+  } catch (err) {
+    console.error(`❌ cron式の解析に失敗しました (${name}):`, err.message);
+  }
+}
 
 const job = schedule('*/1 * * * *', () => {
   console.log('✅ テストジョブ発火');
@@ -17,40 +28,45 @@ dotenv.config();
 // === ジョブ管理用のMap
 const cronJobs = new Map();
 
-// === ジョブ登録関数 ===
+import parser from 'cron-parser';
+
+function logNextRun(expr, name) {
+  try {
+    const interval = parser.parseExpression(expr, { timezone: 'Asia/Tokyo' });
+    const next = interval.next().toString();
+    console.log(`📅 ${name} の次回実行予定: ${next}`);
+  } catch (err) {
+    console.error(`❌ cron式の解析に失敗しました (${name}):`, err.message);
+  }
+}
+
 function registerCron(expr, fn, name) {
-  // 現在時刻を表示（JSTで）
   const now = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
   console.log(`🕒 現在時刻（JST）: ${now}`);
   console.log(`📌 登録予定のジョブ: ${name} → cron式: ${expr}`);
 
-  // 古いジョブがあれば停止して削除
+  logNextRun(expr, name); // ✅ ここで次回実行時刻を表示
+
   if (cronJobs.has(name)) {
     const oldJob = cronJobs.get(name);
     if (typeof oldJob.stop === 'function') oldJob.stop();
     cronJobs.delete(name);
   }
 
-  // 新しいジョブを登録
-  const job = schedule(expr, fn, { scheduled: true });
+  const job = schedule(expr, fn, { scheduled: true, timezone: 'Asia/Tokyo' });
 
-  // 明示的にスタート（startが存在する場合のみ）
   if (typeof job.start === 'function') {
     job.start();
   } else {
     console.warn(`⚠️ job.start() が存在しません: ${name}`);
   }
 
-  // ジョブ構造の確認ログ
   console.log(`🧪 job type for ${name}:`, typeof job);
   console.log(`🧪 job keys for ${name}:`, Object.keys(job));
   console.log(`🧪 job has start:`, typeof job.start === 'function');
   console.log(`🧪 job has cronTime:`, !!job.cronTime);
 
-  // Mapに保存
   cronJobs.set(name, job);
-
-  // 登録完了ログ
   console.log(`✅ ジョブ登録完了: ${name}`);
 }
 
