@@ -288,7 +288,7 @@ client.on('guildScheduledEventCreate', async event => {
   if (!role) {
     role = await guild.roles.create({
       name: '出席予定者',
-      color: 'Pink',
+      color: '#FFC0CB',
       reason: '自動作成: 出席予定者ロール'
     });
   }
@@ -467,9 +467,10 @@ client.on('interactionCreate', async interaction => {
     }
 
     case 'force-morning': {
-      await sendMorningSummary(true);
-      return interaction.reply('✅ 強制的に朝リマインドを実行しました');
-    }
+   // deferReply は不要 → 即時 reply
+   await sendMorningSummary(true);
+   return interaction.reply('✅ 強制的に朝リマインドを実行しました');
+}
 
     case 'set-absence-threshold': {
       const min = interaction.options.getInteger('minutes');
@@ -545,11 +546,12 @@ client.on('messageReactionRemove', async (reaction, user) => {
 });
 
 // Discord Bot ログイン
-client.login(DISCORD_TOKEN);
+  client.login(DISCORD_TOKEN);
+ 
+  // Koyeb用のヘルスチェックサーバーを起動
+  serve({
+    fetch: healthCheckServer.fetch,
+    port: Number(PORT)
+  });
+  startHealthCheckCron();
 
-//Koyeb用のヘルスチェックサーバーを起動
-serve({
-  fetch: healthCheckServer.fetch,
-  port: 3000
-});
-startHealthCheckCron();
