@@ -408,21 +408,32 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageReactionAdd', async (reaction, user) => {
-  if (reaction.partial) await reaction.fetch();
-  if (user.bot || !reaction.message.guildId) return;
-
-  const messageDate = new Date(reaction.message.createdAt).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
-  if (reaction.message.id !== lastReminderMessageId || messageDate !== reminderDate) return;
+  if (user.bot) return;
+  if (reaction.message.id !== lastReminderMessageId) return;
   if (reaction.emoji.name !== '✅') return;
 
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const role = await getOrCreateAttendanceRole(guild);
-    const member = await guild.members.fetch(user.id);
+  const guild = reaction.message.guild;
+  const member = await guild.members.fetch(user.id);
+  const role = await getOrCreateAttendanceRole(guild);
+
+  if (!member.roles.cache.has(role.id)) {
     await member.roles.add(role);
-    console.log(`🎟 ${user.username} に出席予定者ロールを付与しました`);
-  } catch (e) {
-    console.error(`❌ ロール付与失敗: ${user.username}`, e);
+    console.log(`➕ ロール付与: ${user.username}`);
+  }
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+  if (user.bot) return;
+  if (reaction.message.id !== lastReminderMessageId) return;
+  if (reaction.emoji.name !== '✅') return;
+
+  const guild = reaction.message.guild;
+  const member = await guild.members.fetch(user.id);
+  const role = await getOrCreateAttendanceRole(guild);
+
+  if (member.roles.cache.has(role.id)) {
+    await member.roles.remove(role);
+    console.log(`➖ ロール解除: ${user.username}`);
   }
 });
 
