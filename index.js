@@ -9,17 +9,16 @@ import { JSONFile } from 'lowdb/node';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-// === ジョブ管理用のMap
-const cronJobs = new Map();
+// cron-parser を ESM で正しく読み込む
+import { parseExpression } from 'cron-parser';
 
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const cronParser = require('cron-parser');
-const { parseExpression } = cronParser;
+// ジョブ管理用 Map
+const cronJobs = new Map();
 
 function logNextRun(expr, name) {
   try {
-    const interval = parseExpression(expr, { timezone: 'Asia/Tokyo' });
+    // オプションキーは tz: 'Asia/Tokyo' を使う
+    const interval = parseExpression(expr, { tz: 'Asia/Tokyo' });
     const next = interval.next().toString();
     console.log(`📅 ${name} の次回実行予定: ${next}`);
   } catch (err) {
