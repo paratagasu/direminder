@@ -268,7 +268,8 @@ const client = new Client({
     IntentsBitField.Flags.Guilds,
     IntentsBitField.Flags.GuildScheduledEvents,
     IntentsBitField.Flags.GuildMembers,
-    IntentsBitField.Flags.GuildVoiceStates
+    IntentsBitField.Flags.GuildVoiceStates,
+    IntentsBitField.Flags.GuildMessageReactions
   ],
   partials: ['MESSAGE', 'CHANNEL', 'REACTION']
 });
@@ -511,8 +512,9 @@ client.on('interactionCreate', async interaction => {
 
 // メッセージリアクションのハンドラ
 client.on('messageReactionAdd', async (reaction, user) => {
-  if (reaction.message.partial) await reaction.message.fetch(); // ← ここ！
+  console.log('✅ ReactionAdd received:', reaction.emoji.name, 'by', user.username);
 
+  if (reaction.message.partial) await reaction.message.fetch();
   if (reaction.message.id !== lastMorningMessage?.id) return;
   if (user.bot) return;
 
