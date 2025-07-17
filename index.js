@@ -108,15 +108,15 @@ async function sendMorningSummary(isForced = false) {
   const guild   = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
 
-  // 1) 「出席予定者」ロール取得 or 作成
-  let role = guild.roles.cache.find(r => r.name === '出席予定者');
-  if (!role) {
-    role = await guild.roles.create({
-      name: '出席予定者',
-      color: 'Pink',
-      reason: '自動作成: 出席予定者ロール'
-    });
-  }
+   // 「出席予定者」ロール取得 or 作成
+   let role = guild.roles.cache.find(r => r.name === '出席予定者');
+   if (!role) {
+     role = await guild.roles.create({
+       name: '出席予定者',
+       color: '#FFC0CB',  // Pink の HEX コード
+       reason: '自動作成: 出席予定者ロール'
+     });
+   }
 
   // 2) 毎朝リマインド実行時は既存の「出席予定者」ロールを全員から剥奪
   const members = await guild.members.fetch();
@@ -173,7 +173,7 @@ async function scheduleEventReminders() {
   if (!role) {
     role = await guild.roles.create({
       name: '出席予定者',
-      color: 'Pink',
+      color: '#FFC0CB',
       reason: '自動作成: 出席予定者ロール'
     });
   }
