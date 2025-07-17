@@ -158,7 +158,7 @@ async function sendMorningSummary(force = false) {
 function scheduleDailyReminders() {
   const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':').map(v => parseInt(v));
   // 朝リマインド
-  const morningExpr = `${m} ${h} * * *`; // ← 秒フィールド（0）を削除
+  const morningExpr = `0 ${m} ${h} * * *`; // ← 秒フィールドを先頭に追加！
   registerCron(morningExpr, async () => {
     console.log(`🚀 朝リマインド実行: ${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}`);
     try {
