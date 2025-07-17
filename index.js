@@ -35,14 +35,6 @@ function getAllJobNames() {
   return Array.from(cronJobs.keys());
 }
 
-function clearEventReminderJobs() {
-  for (const jobName of getAllJobNames()) {
-    if (jobName.startsWith("event ")) {
-      unregisterCron(jobName);
-    }
-  }
-}
-
 const { DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID } = process.env;
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
@@ -181,6 +173,7 @@ function scheduleDailyReminders() {
 }
 
 async function scheduleEventReminders() {
+  console.log('🧾 現在のジョブ一覧:', getAllJobNames());
   clearEventReminderJobs();
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
