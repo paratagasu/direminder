@@ -146,6 +146,7 @@ function scheduleDailyReminders() {
 }
 
 async function scheduleEventReminders() {
+  clearEventReminderJobs();
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events = await fetchTodaysEvents(guild);
@@ -179,12 +180,14 @@ async function scheduleEventReminders() {
       const timing = offset === 0 ? '開始' : `${offset}分前`;
 
       console.log(`📌 リマインド登録予定: offset=${offset} → ${expr} (${e.name})`);
+      const jobName = `event '${e.name}' -${offset}m (${e.id})`;
 
       registerCron(expr, async () => {
         await channel.send(
           `${mention}\n⏰ **${timing}リマインド**「${e.name}」\n📍 <${chanUrl}>\n🔗 <${eventUrl}>`
         );
-      }, `event '${e.name}' -${offset}m`);
+      }, jobName);
+
     }
   }
 
@@ -407,33 +410,30 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.on('messageReactionAdd', async (reaction, user) => {
-  if (user.bot) return;
-  if (reaction.message.id !== lastReminderMessageId) return;
-  if (reaction.emoji.name !== '✅') return;
-
-  const guild = reaction.message.guild;
-  const member = await guild.members.fetch(user.id);
-  const role = await getOrCreateAttendanceRole(guild);
-
-  if (!member.roles.cache.has(role.id)) {
-    await member.roles.add(role);
-    console.log(`➕ ロール付与: ${user.username}`);
-  }
-});
-
 client.on('messageReactionRemove', async (reaction, user) => {
   if (user.bot) return;
-  if (reaction.message.id !== lastReminderMessageId) return;
-  if (reaction.emoji.name !== '✅') return;
 
-  const guild = reaction.message.guild;
-  const member = await guild.members.fetch(user.id);
-  const role = await getOrCreateAttendanceRole(guild);
+  console.log(`🧪 reactionRemove: emoji=${reaction.emoji.name}, messageId=${reaction.message?.id}, user=${user.username}, partial=${reaction.partial}`);
 
-  if (member.roles.cache.has(role.id)) {
-    await member.roles.remove(role);
-    console.log(`➖ ロール解除: ${user.username}`);
+  try {
+    if (reaction.partial) {
+      await reaction.fetch(); // ✅ メッセージ情報を補完
+      console.log(`🧪 reaction fetched: emoji=${reaction.emoji.name}, messageId=${reaction.message.id}`);
+    }
+
+    if (reaction.message.id !== lastReminderMessageId) return;
+    if (reaction.emoji.name !== '✅') return;
+
+    const guild = reaction.message.guild;
+    const member = await guild.members.fetch(user.id);
+    const role = await getOrCreateAttendanceRole(guild);
+
+    if (member.roles.cache.has(role.id)) {
+      await member.roles.remove(role);
+      console.log(`➖ ロール解除: ${user.username}`);
+    }
+  } catch (err) {
+    console.error(`❌ リアクション解除処理失敗: ${err.message}`);
   }
 });
 
