@@ -106,7 +106,7 @@ function legacyregisterCron(expr, jobFn, desc) {
     return;
   }
 
-  const job = nodeCron.schedule(expr, jobFn, { timezone: 'Asia/Tokyo' });
+  const job = schedule(expr, jobFn, { timezone: 'Asia/Tokyo' });
   jobs.push(job);
 }
 
