@@ -8,6 +8,41 @@ import { JSONFile } from 'lowdb/node';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
+// === ジョブ管理用のMap
+const cronJobs = new Map();
+
+// === ジョブ登録関数 ===
+function registerCron(expr, fn, name) {
+  if (cronJobs.has(name)) {
+    cronJobs.get(name).stop();      // 古いジョブを停止
+    cronJobs.delete(name);          // Mapから削除
+  }
+
+  const job = cron.schedule(expr, fn); // 新しいジョブを登録
+  cronJobs.set(name, job);             // Mapに保存
+  console.log(`📌 ジョブ登録: ${name} → ${expr}`);
+}
+
+function unregisterCron(name) {
+  if (cronJobs.has(name)) {
+    cronJobs.get(name).stop();
+    cronJobs.delete(name);
+    console.log(`🧹 ジョブ削除: ${name}`);
+  }
+}
+
+function getAllJobNames() {
+  return Array.from(cronJobs.keys());
+}
+
+function clearEventReminderJobs() {
+  for (const jobName of getAllJobNames()) {
+    if (jobName.startsWith("event ")) {
+      unregisterCron(jobName);
+    }
+  }
+}
+
 const { DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID } = process.env;
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
@@ -254,11 +289,20 @@ function scheduleNonAttendanceCheck(event) {
         console.log(`✅ 全員参加済み。通知不要 (${event.name})`);
       }
     } catch (err) {
-      console.error(`❌ 未参加チェックエラー: ${err.message}`);
-      }
+　　  console.error(`❌ 未参加チェックエラー: ${err.message}`);
+    }
 
-    }, `event '${event.name}' 参加未確認`);
+  }, `event '${event.name}' 参加未確認`);
+}
+
+function clearEventReminderJobs() {
+  for (const jobName of getAllJobNames()) {
+    if (jobName.startsWith("event ")) {
+      unregisterCron(jobName);
+      console.log(`🧹 ジョブ削除: ${jobName}`);
+    }
   }
+}
 
 function bootstrapSchedules() {
   clearAllJobs();
