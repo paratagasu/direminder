@@ -13,6 +13,11 @@ const cronJobs = new Map();
 
 // === ジョブ登録関数 ===
 function registerCron(expr, fn, name) {
+  // 現在時刻を表示（JSTで）
+  const now = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+  console.log(`🕒 現在時刻（JST）: ${now}`);
+  console.log(`📌 登録予定のジョブ: ${name} → cron式: ${expr}`);
+
   // 古いジョブがあれば停止して削除
   if (cronJobs.has(name)) {
     const oldJob = cronJobs.get(name);
@@ -40,7 +45,7 @@ function registerCron(expr, fn, name) {
   cronJobs.set(name, job);
 
   // 登録完了ログ
-  console.log(`📌 ジョブ登録: ${name} → ${expr}`);
+  console.log(`✅ ジョブ登録完了: ${name}`);
 }
 
 function unregisterCron(name) {
