@@ -32,7 +32,7 @@ function registerCron(expr, fn, name) {
   }
 
   // 新しいジョブを登録
-  const job = cron.schedule(expr, fn, { scheduled: true });
+  const job = nodeCron.schedule(expr, fn, { scheduled: true });
 
   // 明示的にスタート（startが存在する場合のみ）
   if (typeof job.start === 'function') {
@@ -106,7 +106,7 @@ function legacyregisterCron(expr, jobFn, desc) {
     return;
   }
 
-  const job = cron.schedule(expr, jobFn, { timezone: 'Asia/Tokyo' });
+  const job = nodeCron.schedule(expr, jobFn, { timezone: 'Asia/Tokyo' });
   jobs.push(job);
 }
 
@@ -350,7 +350,7 @@ client.once('ready', async () => {
   console.log(`   → morningTime = ${db.data.morningTime}`);
   console.log(`   → 1st offset  = ${db.data.firstOffset}`);
   console.log(`   → 2nd offset  = ${db.data.secondOffset}`);
-  console.log(`🧪 cron.schedule source:\n`, cron.schedule.toString().slice(0, 500));
+  console.log(`🧪 cron.schedule source:\n`, nodeCron.schedule.toString().slice(0, 500));
 
 
   const commands = [
