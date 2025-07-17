@@ -68,7 +68,7 @@ let jobs = [];
 let lastReminderMessageId = null;
 let reminderDate = null;
 
-function registerCron(expr, jobFn, desc) {
+function legacyregisterCron(expr, jobFn, desc) {
   console.log(`📌 登録予定: ${expr} (${desc})`);
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) {
