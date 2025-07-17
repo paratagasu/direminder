@@ -379,13 +379,28 @@ client.on('interactionCreate', async interaction => {
 
   switch (interaction.commandName) {
     case 'ping':
-      return interaction.reply('🏓 Pong!');
+  return interaction.reply('🏓 Pong!');
 
     case 'set-morning-time': {
       const time = interaction.options.getString('time');
       db.data.morningTime = time;
       await db.write();
-      bootstrapSchedules();
+
+      bootstrapSchedules(); // ✅ ジョブ再登録
+
+      // ✅ 即時実行判定
+      const now = new Date();
+      const [h, m] = time.split(':').map(Number);
+      const morning = new Date();
+      morning.setHours(h, m, 0, 0);
+
+      if (now >= morning) {
+        console.log(`🕒 現在時刻 ${now.toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' })} は朝リマインド後 → 強制実行`);
+        await sendMorningSummary(true);
+      } else {
+        console.log(`🕒 現在時刻 ${now.toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' })} は朝リマインド前 → cronに任せる`);
+      }
+
       return interaction.reply(`✅ 朝リマインドを **${time}** に設定しました`);
     }
 
