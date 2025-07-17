@@ -344,6 +344,8 @@ client.once('ready', async () => {
   console.log(`   → morningTime = ${db.data.morningTime}`);
   console.log(`   → 1st offset  = ${db.data.firstOffset}`);
   console.log(`   → 2nd offset  = ${db.data.secondOffset}`);
+  console.log(`🧪 cron.schedule source:\n`, cron.schedule.toString().slice(0, 500));
+
 
   const commands = [
     new SlashCommandBuilder().setName('ping').setDescription('Bot疎通チェック'),
