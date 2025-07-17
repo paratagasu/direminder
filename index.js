@@ -18,7 +18,7 @@ function registerCron(expr, fn, name) {
     cronJobs.delete(name);          // Mapから削除
   }
 
-  const job = cron.schedule(expr, fn); // 新しいジョブを登録
+  const job = cron.schedule(expr, fn, { scheduled: true }); // 新しいジョブを登録
   job.start(); // ✅ 明示的にスタート！
   cronJobs.set(name, job);             // Mapに保存
   console.log(`📌 ジョブ登録: ${name} → ${expr}`);
