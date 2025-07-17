@@ -4,8 +4,8 @@ import { startHealthCheckCron } from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, Partials } from 'discord.js';
 import { schedule } from 'node-cron'; // ✅ named importで確実に本物を使う
 
-const job = nodeCron.schedule('*/1 * * * *', () => {
-  console.log('✅ 1分ごとのテストジョブが発火しました');
+const job = schedule('*/1 * * * *', () => {
+  console.log('✅ テストジョブ発火');
 });
 job.start();
 
@@ -32,7 +32,7 @@ function registerCron(expr, fn, name) {
   }
 
   // 新しいジョブを登録
-  const job = nodeCron.schedule(expr, fn, { scheduled: true });
+  const job = schedule(expr, fn, { scheduled: true });
 
   // 明示的にスタート（startが存在する場合のみ）
   if (typeof job.start === 'function') {
@@ -350,8 +350,8 @@ client.once('ready', async () => {
   console.log(`   → morningTime = ${db.data.morningTime}`);
   console.log(`   → 1st offset  = ${db.data.firstOffset}`);
   console.log(`   → 2nd offset  = ${db.data.secondOffset}`);
-  console.log(`🧪 cron.schedule source:\n`, nodeCron.schedule.toString().slice(0, 500));
-  console.log(`🧪 nodeCron.schedule source:\n`, nodeCron.schedule.toString());
+  console.log(`🧪 cron.schedule source:\n`, Cron.schedule.toString().slice(0, 500));
+  console.log(`🧪 nodeCron.schedule source:\n`, Cron.schedule.toString());
 
 
   const commands = [
