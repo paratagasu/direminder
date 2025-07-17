@@ -17,11 +17,11 @@ dotenv.config();
 // === ジョブ管理用のMap
 const cronJobs = new Map();
 
-import parser from 'cron-parser';
+import { parseExpression } from 'cron-parser'; // ✅ named import
 
 function logNextRun(expr, name) {
   try {
-    const interval = parser.parseExpression(expr, { timezone: 'Asia/Tokyo' });
+    const interval = parseExpression(expr, { timezone: 'Asia/Tokyo' });
     const next = interval.next().toString();
     console.log(`📅 ${name} の次回実行予定: ${next}`);
   } catch (err) {
