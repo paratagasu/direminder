@@ -2,7 +2,13 @@ import { serve } from '@hono/node-server';
 import healthCheckServer from './server.js';
 import { startHealthCheckCron } from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, Partials } from 'discord.js';
-import cron from 'node-cron';
+import * as nodeCron from 'node-cron';
+
+const job = nodeCron.schedule('*/1 * * * *', () => {
+  console.log('✅ 1分ごとのテストジョブが発火しました');
+});
+job.start();
+
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import * as dotenv from 'dotenv';
