@@ -341,6 +341,33 @@ client.once('ready', async () => {
   bootstrapSchedules();
 });
 
+client.on('messageReactionAdd', async (reaction, user) => {
+  if (user.bot) return;
+
+  console.log(`🧪 reactionAdd: emoji=${reaction.emoji.name}, messageId=${reaction.message?.id}, user=${user.username}, partial=${reaction.partial}`);
+
+  try {
+    if (reaction.partial) {
+      await reaction.fetch();
+      console.log(`🧪 reaction fetched: emoji=${reaction.emoji.name}, messageId=${reaction.message.id}`);
+    }
+
+    if (reaction.message.id !== lastReminderMessageId) return;
+    if (reaction.emoji.name !== '✅') return;
+
+    const guild = reaction.message.guild;
+    const member = await guild.members.fetch(user.id);
+    const role = await getOrCreateAttendanceRole(guild);
+
+    if (!member.roles.cache.has(role.id)) {
+      await member.roles.add(role);
+      console.log(`➕ ロール付与: ${user.username}`);
+    }
+  } catch (err) {
+    console.error(`❌ リアクション付与処理失敗: ${err.message}`);
+  }
+});
+
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
