@@ -350,8 +350,8 @@ client.once('ready', async () => {
   console.log(`   → morningTime = ${db.data.morningTime}`);
   console.log(`   → 1st offset  = ${db.data.firstOffset}`);
   console.log(`   → 2nd offset  = ${db.data.secondOffset}`);
-  console.log(`🧪 cron.schedule source:\n`, Cron.schedule.toString().slice(0, 500));
-  console.log(`🧪 nodeCron.schedule source:\n`, Cron.schedule.toString());
+  console.log(`🧪 cron.schedule source:\n`, schedule.toString().slice(0, 500));
+  console.log(`🧪 nodeCron.schedule source:\n`, schedule.toString());
 
 
   const commands = [
