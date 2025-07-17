@@ -13,19 +13,33 @@ const cronJobs = new Map();
 
 // === ジョブ登録関数 ===
 function registerCron(expr, fn, name) {
+  // 古いジョブがあれば停止して削除
   if (cronJobs.has(name)) {
-    cronJobs.get(name).stop();      // 古いジョブを停止
-    cronJobs.delete(name);          // Mapから削除
+    const oldJob = cronJobs.get(name);
+    if (typeof oldJob.stop === 'function') oldJob.stop();
+    cronJobs.delete(name);
   }
 
-  const job = cron.schedule(expr, fn, { scheduled: true }); // 新しいジョブを登録
-  job.start(); // ✅ 明示的にスタート！
+  // 新しいジョブを登録
+  const job = cron.schedule(expr, fn, { scheduled: true });
 
-  // ✅ job の構造を確認するログ（ここでOK！）
+  // 明示的にスタート（startが存在する場合のみ）
+  if (typeof job.start === 'function') {
+    job.start();
+  } else {
+    console.warn(`⚠️ job.start() が存在しません: ${name}`);
+  }
+
+  // ジョブ構造の確認ログ
   console.log(`🧪 job type for ${name}:`, typeof job);
   console.log(`🧪 job keys for ${name}:`, Object.keys(job));
+  console.log(`🧪 job has start:`, typeof job.start === 'function');
+  console.log(`🧪 job has cronTime:`, !!job.cronTime);
 
-  cronJobs.set(name, job); // Mapに保存
+  // Mapに保存
+  cronJobs.set(name, job);
+
+  // 登録完了ログ
   console.log(`📌 ジョブ登録: ${name} → ${expr}`);
 }
 
