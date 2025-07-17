@@ -344,8 +344,8 @@ client.once('ready', async () => {
   bootstrapSchedules();
 
   for (const [name, job] of cronJobs.entries()) {
-  const next = job.nextDates().toString();
-  console.log(`🧪 ジョブ: ${name}, running=${job.running}, next=${next}`);
+  const expr = job.cronTime?.source ?? 'N/A';
+  console.log(`🧪 ジョブ: ${name}, running=${job.running ?? 'unknown'}, expr=${expr}`);
 }
 
 });
