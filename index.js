@@ -3,17 +3,6 @@ import healthCheckServer from './server.js';
 import { startHealthCheckCron } from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, Partials } from 'discord.js';
 import { schedule } from 'node-cron'; // ✅ named importで確実に本物を使う
-import parser from 'cron-parser';
-
-function logNextRun(expr, name) {
-  try {
-    const interval = parser.parseExpression(expr, { timezone: 'Asia/Tokyo' });
-    const next = interval.next().toString();
-    console.log(`📅 ${name} の次回実行予定: ${next}`);
-  } catch (err) {
-    console.error(`❌ cron式の解析に失敗しました (${name}):`, err.message);
-  }
-}
 
 const job = schedule('*/1 * * * *', () => {
   console.log('✅ テストジョブ発火');
