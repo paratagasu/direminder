@@ -1,21 +1,7 @@
 {
-  "type": "module",
-  "name": "direminder",
-  "version": "1.0.0",
-  "description": "Discord bot for event reminders and announcements",
-  "main": "index.js",
-  
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@hono/node-server": "^1.15.0",
-    "cron-parser": "^5.3.0",
-    "discord.js": "^14.21.0",
-    "dotenv": "^17.1.0",
-    "express": "^5.1.0",
-    "lowdb": "^7.0.1",
-    "node-cron": "^3.0.2",
-    "node-fetch": "^3.3.2"
-  }
+  "morningTime": "07:00",
+  "firstOffset": 60,
+  "secondOffset": 15,
+  "startAnnouncement": true,
+  "absenceThreshold": 3
 }

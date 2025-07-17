@@ -20,15 +20,26 @@ if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
 // デフォルト設定
 const defaultData = {
   morningTime: '07:00',
-  reminderOffsets: [60, 15]
+  firstOffset: 60,            // １回目リマインド（分前）
+  secondOffset: 15,           // ２回目リマインド（分前）
+  startAnnouncement: true,    // イベント開始時の @eve
+  // ryone 通知
+  absenceThreshold: 3         // 開始後◯分で不参加チェック
 };
+
 
 // DB 初期化
 const adapter = new JSONFile('settings.json');
 const db = new Low(adapter, defaultData);
-await db.read();
-db.data ||= defaultData;
-await db.write();
+  await db.read();
+  // 既存データがあれば上書きせずにマージする
+  if (!db.data) {
+   db.data = defaultData;
+  } else {
+   db.data = { ...defaultData, ...db.data };
+  }
+  await db.write();
+
 
 // cron ジョブ管理
 const jobs = [];
@@ -78,31 +89,66 @@ async function fetchWeekEvents(guild) {
 }
 
 // リマインドロジック
-async function sendMorningSummary() {
+// 先頭に追加しておいてください
+let lastMorningMessage = null;
+
+async function sendMorningSummary(isForced = false) {
   const guild   = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
-  const events  = await fetchTodaysEvents(guild);
+
+  // 1) 「出席予定者」ロール取得 or 作成
+  let role = guild.roles.cache.find(r => r.name === '出席予定者');
+  if (!role) {
+    role = await guild.roles.create({
+      name: '出席予定者',
+      color: 'Pink',
+      reason: '自動作成: 出席予定者ロール'
+    });
+  }
+
+  // 2) 毎朝リマインド実行時は既存の「出席予定者」ロールを全員から剥奪
+  const members = await guild.members.fetch();
+  for (const member of members.values()) {
+    if (member.roles.cache.has(role.id)) {
+      await member.roles.remove(role).catch(console.error);
+    }
+  }
+
+  // 3) 今日のイベント取得
+  const events = await fetchTodaysEvents(guild);
+
+  // 4) メッセージ本文組み立て
+  let content = '';
   if (events.size === 0) {
-    console.log('📭 本日のイベントはありません');
-    return;
+    // イベントなし
+    content = isForced
+      ? '📭 本日のイベントはありません'
+      : '@everyone\n📭 本日のイベントはありません';
+  } else {
+    // イベントあり
+    content = isForced ? '' : '@everyone\n';
+    content += '📅 本日のイベント一覧:\n';
+    for (const e of events.values()) {
+      const time = new Date(e.scheduledStartTimestamp)
+        .toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' });
+      const host     = e.creator?.username || '不明';
+      const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+      const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
+      content +=
+        `• ${e.name} / ${time} / ${host}\n` +
+        `  📍 チャンネル: <${chanUrl}>\n` +
+        `  🔗 イベント:   <${eventUrl}>\n`;
+    }
+    content += '\n✅ 出席／❌ 欠席 で参加表明お願いします！';
   }
 
-  let msg = '📅 本日のイベント一覧:\n';
-  for (const e of events.values()) {
-    const time = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', {
-  timeZone: 'Asia/Tokyo'
-});
-    const host     = e.creator?.username || '不明';
-    const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
-    const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-    msg += `• ${e.name} / ${time} / ${host}\n` +
-           `  📍 チャンネル: <${chanUrl}>\n` +
-           `  🔗 イベント:   <${eventUrl}>\n`;
+  // 5) メッセージ送信＆リアクション付与
+  const msg = await channel.send({ content });
+  lastMorningMessage = msg;
+  if (events.size > 0) {
+    await msg.react('✅');
+    await msg.react('❌');
   }
-
-  const reminder = await channel.send({ content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！' });
-  await reminder.react('✅');
-  await reminder.react('❌');
 }
 
 async function scheduleEventReminders() {
@@ -110,34 +156,85 @@ async function scheduleEventReminders() {
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events  = await fetchTodaysEvents(guild);
 
-  for (const offset of db.data.reminderOffsets) {
-    for (const e of events.values()) {
-      // JSTでイベント開始時刻を取得
-      const startJST = new Date(new Date(e.scheduledStartTimestamp).toLocaleString("en-US", {
-        timeZone: "Asia/Tokyo"
-      }));
+  // 「出席予定者」ロール取得 or 作成
+  let role = guild.roles.cache.find(r => r.name === '出席予定者');
+  if (!role) {
+    role = await guild.roles.create({
+      name: '出席予定者',
+      color: 'Pink',
+      reason: '自動作成: 出席予定者ロール'
+    });
+  }
 
-      // JSTでリマインド時刻を逆算
+  for (const e of events.values()) {
+    // JST でイベント開始時刻を取得
+    const startJST = new Date(
+      new Date(e.scheduledStartTimestamp)
+        .toLocaleString('en-US', { timeZone: 'Asia/Tokyo' })
+    );
+
+    // １回目／２回目のリマインドを個別設定から取得
+    const offsets = [db.data.firstOffset, db.data.secondOffset];
+    for (const offset of offsets) {
+      // リマインド時刻を逆算
       const target = new Date(startJST.getTime() - offset * 60000);
-
-      // cron式をJSTで構成
+      // cron 式を JST で構成
       const expr = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
-
-      const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
-      const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
 
       registerCron(expr, async () => {
         try {
           await channel.send(
-            `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
-            `📍 チャンネル: <${chanUrl}>\n` +
-            `🔗 イベント:   <${eventUrl}>`
+            `<@&${role.id}> ⏰ **${offset}分前リマインド** 「${e.name}」\n` +
+            `📍 チャンネル: <https://discord.com/channels/${GUILD_ID}/${e.channelId}>\n` +
+            `🔗 イベント:   <https://discord.com/events/${GUILD_ID}/${e.id}>`
           );
         } catch (err) {
-          console.error(`❌ リマインド送信失敗: ${e.name}`, err);
+          console.error(`❌ リマインド送信失敗 (${offset}分前): ${e.name}`, err);
         }
       }, `event '${e.name}' -${offset}m`);
     }
+
+    // イベント開始時の @everyone 通知 (オン/オフ切り替え)
+    if (db.data.startAnnouncement) {
+      const expr0 = `${startJST.getMinutes()} ${startJST.getHours()} ${startJST.getDate()} ${startJST.getMonth() + 1} *`;
+      registerCron(expr0, async () => {
+        try {
+          await channel.send(
+            `@everyone\n🚀 「${e.name}」が始まりました！`
+          );
+        } catch (err) {
+          console.error(`❌ 開始通知失敗: ${e.name}`, err);
+        }
+      }, `start-announcement '${e.name}'`);
+    }
+
+    // イベント開始後のボイス参加チェック
+    const thresholdMs = (db.data.absenceThreshold || 3) * 60000;
+    const checkTime  = new Date(startJST.getTime() + thresholdMs);
+    const exprChk    = `${checkTime.getMinutes()} ${checkTime.getHours()} ${checkTime.getDate()} ${checkTime.getMonth() + 1} *`;
+
+    registerCron(exprChk, async () => {
+      try {
+        const eChannel = await guild.channels.fetch(e.channelId);
+        if (!eChannel.isVoiceBased()) return;
+
+        // VC にいるメンバー ID
+        const voiceIds = [...eChannel.members.keys()];
+        // ロールを持っているのに VC にいないメンバー
+        const absent = (await guild.members.fetch())
+          .filter(m => m.roles.cache.has(role.id) && !voiceIds.includes(m.id))
+          .map(m => `<@${m.id}>`);
+
+        if (absent.length > 0) {
+          await channel.send(
+            `⚠️ 以下の出席予定者が参加していません:\n` +
+            absent.join('\n')
+          );
+        }
+      } catch (err) {
+        console.error(`❌ 不在チェック失敗: ${e.name}`, err);
+      }
+    }, `absence-check '${e.name}' +${db.data.absenceThreshold}m`);
   }
 }
 
@@ -155,34 +252,118 @@ function bootstrapSchedules() {
 
 // Discord Client（スケジュール作成前に定義）
 const client = new Client({
-  intents: [IntentsBitField.Flags.Guilds, IntentsBitField.Flags.GuildScheduledEvents]
+  intents: [
+    IntentsBitField.Flags.Guilds,
+    IntentsBitField.Flags.GuildScheduledEvents,
+    IntentsBitField.Flags.GuildMembers,
+    IntentsBitField.Flags.GuildVoiceStates
+  ],
+  partials: ['MESSAGE', 'CHANNEL', 'REACTION']
 });
+
 
 // リアルタイムイベント検知
 client.on('guildScheduledEventCreate', async event => {
   if (event.guildId !== GUILD_ID) return;
   console.log(`🆕 New scheduled event detected: ${event.name}`);
-  for (const offset of db.data.reminderOffsets) {
-    const target   = new Date(event.scheduledStartTimestamp - offset * 60000);
-    const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
-    const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${event.channelId}`;
-    const eventUrl = `https://discord.com/events/${GUILD_ID}/${event.id}`;
+
+  const guild   = await client.guilds.fetch(GUILD_ID);
+  const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
+
+  // 出席予定者ロール取得 or 作成
+  let role = guild.roles.cache.find(r => r.name === '出席予定者');
+  if (!role) {
+    role = await guild.roles.create({
+      name: '出席予定者',
+      color: 'Pink',
+      reason: '自動作成: 出席予定者ロール'
+    });
+  }
+
+  // JSTでイベント開始時刻を取得
+  const startJST = new Date(
+    new Date(event.scheduledStartTimestamp)
+      .toLocaleString('en-US', { timeZone: 'Asia/Tokyo' })
+  );
+
+  // １回目／２回目リマインド
+  const offsets = [db.data.firstOffset, db.data.secondOffset];
+  for (const offset of offsets) {
+    const target = new Date(startJST.getTime() - offset * 60000);
+    const expr = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
+
     registerCron(expr, async () => {
-      const ch = await client.guilds.fetch(GUILD_ID).then(g => g.channels.fetch(ANNOUNCE_CHANNEL_ID));
-      await ch.send(
-        `⏰ **${offset}分前リマインド** 「${event.name}」\n` +
-        `📍 チャンネル: <${chanUrl}>\n` +
-        `🔗 イベント:   <${eventUrl}>`
-      );
+      try {
+        const ch = await client.guilds
+          .fetch(GUILD_ID)
+          .then(g => g.channels.fetch(ANNOUNCE_CHANNEL_ID));
+        await ch.send(
+          `<@&${role.id}> ⏰ **${offset}分前リマインド** 「${event.name}」\n` +
+          `📍 チャンネル: <https://discord.com/channels/${GUILD_ID}/${event.channelId}>\n` +
+          `🔗 イベント:   <https://discord.com/events/${GUILD_ID}/${event.id}>`
+        );
+      } catch (err) {
+        console.error(`❌ リマインド送信失敗 (${offset}分前): ${event.name}`, err);
+      }
     }, `new-event '${event.name}' -${offset}m`);
   }
+
+  // イベント開始時 @everyone 通知（オン/オフ判定）
+  if (db.data.startAnnouncement) {
+    const expr0 = `${startJST.getMinutes()} ${startJST.getHours()} ${startJST.getDate()} ${startJST.getMonth() + 1} *`;
+    registerCron(expr0, async () => {
+      try {
+        const ch = await client.guilds
+          .fetch(GUILD_ID)
+          .then(g => g.channels.fetch(ANNOUNCE_CHANNEL_ID));
+        await ch.send(
+          `@everyone\n🚀 「${event.name}」が始まりました！`
+        );
+      } catch (err) {
+        console.error(`❌ 開始通知失敗: ${event.name}`, err);
+      }
+    }, `new-event-start '${event.name}'`);
+  }
+
+  // 開始後のボイス不在チェック
+  const thresholdMs = (db.data.absenceThreshold || 3) * 60000;
+  const checkTime  = new Date(startJST.getTime() + thresholdMs);
+  const exprChk    = `${checkTime.getMinutes()} ${checkTime.getHours()} ${checkTime.getDate()} ${checkTime.getMonth() + 1} *`;
+
+  registerCron(exprChk, async () => {
+    try {
+      const guild2  = await client.guilds.fetch(GUILD_ID);
+      const ch2     = await guild2.channels.fetch(ANNOUNCE_CHANNEL_ID);
+      const eChannel = await guild2.channels.fetch(event.channelId);
+      if (!eChannel.isVoiceBased()) return;
+
+      const voiceIds = [...eChannel.members.keys()];
+      const members = await guild2.members.fetch();
+      const absent = members
+        .filter(m => m.roles.cache.has(role.id) && !voiceIds.includes(m.id))
+        .map(m => `<@${m.id}>`);
+
+      if (absent.length > 0) {
+        await ch2.send(
+          `⚠️ 以下の出席予定者が参加していません:\n` +
+          absent.join('\n')
+        );
+      }
+    } catch (err) {
+      console.error(`❌ 不在チェック失敗: ${event.name}`, err);
+    }
+  }, `new-event-absence '${event.name}' +${db.data.absenceThreshold}m`);
 });
 
 // スラッシュコマンド登録＆Bot起動
-client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`   → morningTime = ${db.data.morningTime}`);
-  console.log(`   → offsets     = ${db.data.reminderOffsets.join(',')}`);
+ client.once('ready', async () => {
+   console.log(`✅ Logged in as ${client.user.tag}`);
+   console.log(`   → morningTime       = ${db.data.morningTime}`);
+   console.log(`   → firstOffset       = ${db.data.firstOffset}分前`);
+   console.log(`   → secondOffset      = ${db.data.secondOffset}分前`);
+   console.log(`   → startAnnouncement = ${db.data.startAnnouncement}`);
+   console.log(`   → absenceThreshold  = ${db.data.absenceThreshold}分`);
+
 
   const commands = [
     new SlashCommandBuilder().setName('ping').setDescription('Bot疎通チェック'),
@@ -190,10 +371,31 @@ client.once('ready', async () => {
       .setName('set-morning-time')
       .setDescription('朝リマインドの時刻を設定')
       .addStringOption(opt => opt.setName('time').setDescription('HH:MM形式').setRequired(true)),
+
     new SlashCommandBuilder()
-      .setName('set-reminder-offset')
-      .setDescription('イベントリマインドの分前を設定')
-      .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
+      .setName('set-first-offset')
+      .setDescription('１回目リマインドを何分前にするか設定')
+      .addIntegerOption(opt => opt.setName('minutes').setDescription('分数').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('set-second-offset')
+      .setDescription('２回目リマインドを何分前にするか設定')
+      .addIntegerOption(opt => opt.setName('minutes').setDescription('分数').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('toggle-start-announcement')
+      .setDescription('イベント開始時の @everyone 通知をオン/オフ')
+      .addBooleanOption(opt => opt.setName('enabled').setDescription('true=オン, false=オフ').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('force-morning')
+      .setDescription('朝のリマインドを強制実行'),
+
+    new SlashCommandBuilder()
+      .setName('set-absence-threshold')
+      .setDescription('参加チェックの遅延時間(分)を設定')
+      .addIntegerOption(opt => opt.setName('minutes').setDescription('分数').setRequired(true)),
+
     new SlashCommandBuilder()
       .setName('week-events')
       .setDescription('直近1週間のイベント一覧を表示')
@@ -227,12 +429,41 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply(`✅ 朝リマインドを **${time}** に設定し再登録しました`);
     }
 
-    case 'set-reminder-offset': {
+    case 'set-first-offset': {
       const min = interaction.options.getInteger('minutes');
-      db.data.reminderOffsets = [min];
+      db.data.firstOffset = min;
       await db.write();
       bootstrapSchedules();
-      return interaction.reply(`✅ リマインドを **${min}分前** に設定し再登録しました`);
+      return interaction.reply(`✅ １回目リマインドを**${min}分前**に設定しました`);
+    }
+
+    case 'set-second-offset': {
+      const min = interaction.options.getInteger('minutes');
+      db.data.secondOffset = min;
+       await db.write();
+      bootstrapSchedules();
+      return interaction.reply(`✅ ２回目リマインドを**${min}分前**に設定しました`);
+    }
+
+    case 'toggle-start-announcement': {
+       const enabled = interaction.options.getBoolean('enabled');
+       db.data.startAnnouncement = enabled;
+       await db.write();
+      bootstrapSchedules();
+       return interaction.reply(`✅ イベント開始時の @everyone 通知を**${enabled ? 'オン' : 'オフ'}**に設定し、即時反映しました`);
+    }
+
+    case 'force-morning': {
+      await sendMorningSummary(true);
+      return interaction.reply('✅ 強制的に朝リマインドを実行しました');
+    }
+
+    case 'set-absence-threshold': {
+      const min = interaction.options.getInteger('minutes');
+      db.data.absenceThreshold = min;
+      await db.write();
+      bootstrapSchedules();
+      return interaction.reply(`✅ 不参加チェックを開始${min}分後に設定しました`);
     }
 
     case 'week-events': {
@@ -264,6 +495,39 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply(msg); // ← ここも editReply に変更！
     }
   }
+});
+
+// メッセージリアクションのハンドラ
+client.on('messageReactionAdd', async (reaction, user) => {
+  if (reaction.message.partial) await reaction.message.fetch(); // ← ここ！
+
+  if (reaction.message.id !== lastMorningMessage?.id) return;
+  if (user.bot) return;
+
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const member = await guild.members.fetch(user.id);
+  const role = guild.roles.cache.find(r => r.name === '出席予定者');
+  if (reaction.emoji.name === '✅') {
+    await member.roles.add(role).catch(console.error);
+  }
+  if (reaction.emoji.name === '❌') {
+    await member.roles.remove(role).catch(console.error);
+  }
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+  if (reaction.message.partial) await reaction.message.fetch(); // ← ここ！
+
+  if (reaction.message.id !== lastMorningMessage?.id) return;
+  if (user.bot) return;
+
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const member = await guild.members.fetch(user.id);
+  const role = guild.roles.cache.find(r => r.name === '出席予定者');
+  if (reaction.emoji.name === '✅') {
+    await member.roles.remove(role).catch(console.error);
+  }
+  // ❌ の除去は無視してOK
 });
 
 // Discord Bot ログイン
