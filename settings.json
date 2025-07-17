@@ -1,0 +1,7 @@
+{
+  "morningTime": "07:00",
+  "firstOffset": 60,
+  "secondOffset": 15,
+  "startAnnouncement": true,
+  "absenceThreshold": 3
+}
