@@ -20,7 +20,12 @@ function registerCron(expr, fn, name) {
 
   const job = cron.schedule(expr, fn, { scheduled: true }); // 新しいジョブを登録
   job.start(); // ✅ 明示的にスタート！
-  cronJobs.set(name, job);             // Mapに保存
+
+  // ✅ job の構造を確認するログ（ここでOK！）
+  console.log(`🧪 job type for ${name}:`, typeof job);
+  console.log(`🧪 job keys for ${name}:`, Object.keys(job));
+
+  cronJobs.set(name, job); // Mapに保存
   console.log(`📌 ジョブ登録: ${name} → ${expr}`);
 }
 
