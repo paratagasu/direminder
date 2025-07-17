@@ -207,18 +207,21 @@ async function scheduleEventReminders() {
     }
 
     // イベント開始時の @everyone 通知 (オン/オフ切り替え)
-    if (db.data.startAnnouncement) {
-      const expr0 = `${startJST.getMinutes()} ${startJST.getHours()} ${startJST.getDate()} ${startJST.getMonth() + 1} *`;
-      registerCron(expr0, async () => {
-        try {
-          await channel.send(
-            `@everyone\n🚀 「${e.name}」が始まりました！`
-          );
-        } catch (err) {
-          console.error(`❌ 開始通知失敗: ${e.name}`, err);
-        }
-      }, `start-announcement '${e.name}'`);
-    }
+    // --- scheduleEventReminders() 中の開始通知部分 ---
+  if (db.data.startAnnouncement) {
+    const expr0 = `${startJST.getMinutes()} ${startJST.getHours()} ${startJST.getDate()} ${startJST.getMonth() + 1} *`;
+    registerCron(expr0, async () => {
+      try {
+       await channel.send(
+         `@everyone\n🚀 「${e.name}」が始まりました！\n` +
+         `📍 会場チャンネル: <https://discord.com/channels/${GUILD_ID}/${e.channelId}>\n` +
+         `🔗 イベントリンク:  <https://discord.com/events/${GUILD_ID}/${e.id}>`
+       );
+     } catch (err) {
+       console.error(`❌ 開始通知失敗: ${e.name}`, err);
+     }
+   }, `start-announcement '${e.name}'`);
+ }
 
     // イベント開始後のボイス参加チェック
     const thresholdMs = (db.data.absenceThreshold || 3) * 60000;
@@ -322,21 +325,21 @@ client.on('guildScheduledEventCreate', async event => {
   }
 
   // イベント開始時 @everyone 通知（オン/オフ判定）
-  if (db.data.startAnnouncement) {
-    const expr0 = `${startJST.getMinutes()} ${startJST.getHours()} ${startJST.getDate()} ${startJST.getMonth() + 1} *`;
-    registerCron(expr0, async () => {
-      try {
-        const ch = await client.guilds
-          .fetch(GUILD_ID)
-          .then(g => g.channels.fetch(ANNOUNCE_CHANNEL_ID));
-        await ch.send(
-          `@everyone\n🚀 「${event.name}」が始まりました！`
-        );
-      } catch (err) {
-        console.error(`❌ 開始通知失敗: ${event.name}`, err);
-      }
-    }, `new-event-start '${event.name}'`);
-  }
+  // --- guildScheduledEventCreate ハンドラ内の開始通知部分 ---
+ if (db.data.startAnnouncement) {
+   const expr0 = `${startJST.getMinutes()} ${startJST.getHours()} ${startJST.getDate()} ${startJST.getMonth() + 1} *`;
+   registerCron(expr0, async () => {
+     try {
+       await ch.send(
+         `@everyone\n🚀 「${event.name}」が始まりました！\n` +
+         `📍 会場チャンネル: <https://discord.com/channels/${GUILD_ID}/${event.channelId}>\n` +
+         `🔗 イベントリンク:  <https://discord.com/events/${GUILD_ID}/${event.id}>`
+       );
+     } catch (err) {
+       console.error(`❌ 開始通知失敗: ${event.name}`, err);
+     }
+   }, `new-event-start '${event.name}'`);
+ }
 
   // 開始後のボイス不在チェック
   const thresholdMs = (db.data.absenceThreshold || 3) * 60000;
