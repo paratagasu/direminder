@@ -90,6 +90,7 @@ async function fetchTodaysEvents(guild) {
 }
 
 async function sendMorningSummary(force = false) {
+  console.log(`📅 sendMorningSummary() 実行開始（force=${force}）`);
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events = await fetchTodaysEvents(guild);
@@ -98,6 +99,7 @@ async function sendMorningSummary(force = false) {
 
   if (events.size === 0) {
     await channel.send('📭 本日のイベントはありません。');
+    console.log(`📭 イベントなし通知送信完了`);
     return;
   }
 
@@ -116,9 +118,11 @@ async function sendMorningSummary(force = false) {
     content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！',
     allowedMentions: { parse: ['everyone'] } // ← @everyone の通知を有効化！
   });
+  console.log(`✅ イベント一覧通知送信完了 (${reminder.id})`);
 
   await reminder.react('✅');
   await reminder.react('❌');
+  console.log(`✅ リアクション追加完了`);
 
   lastReminderMessageId = reminder.id;
   reminderDate = new Date().toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
@@ -127,14 +131,21 @@ function scheduleDailyReminders() {
   const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':').map(v => parseInt(v));
   // 朝リマインド
   const morningExpr = `${m} ${h} * * *`; // ← 秒フィールド（0）を削除
-  registerCron(morningExpr, () => sendMorningSummary(false), '朝のまとめ');
+  registerCron(morningExpr, async () => {
+    console.log(`🚀 朝リマインド実行: ${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}`);
+    try {
+      await sendMorningSummary(false);
+      console.log(`✅ 朝リマインド送信完了`);
+    } catch (err) {
+      console.error(`❌ 朝リマインド送信失敗: ${err.message}`);
+    }
+  }, '朝のまとめ');
 
 // イベント再スケジュール
   registerCron('* * * * *', scheduleEventReminders, 'イベントの再スケジュール'); // 毎時0分など
 }
 
 async function scheduleEventReminders() {
-  clearAllJobs(); // ← ここが重要！
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events = await fetchTodaysEvents(guild);
