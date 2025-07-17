@@ -351,6 +351,7 @@ client.once('ready', async () => {
   console.log(`   → 1st offset  = ${db.data.firstOffset}`);
   console.log(`   → 2nd offset  = ${db.data.secondOffset}`);
   console.log(`🧪 cron.schedule source:\n`, nodeCron.schedule.toString().slice(0, 500));
+  console.log(`🧪 nodeCron.schedule source:\n`, nodeCron.schedule.toString());
 
 
   const commands = [
