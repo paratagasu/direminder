@@ -17,7 +17,8 @@ dotenv.config();
 // === ジョブ管理用のMap
 const cronJobs = new Map();
 
-import { parseExpression } from 'cron-parser'; // ✅ named import
+import cronParser from 'cron-parser';
+const { parseExpression } = cronParser;
 
 function logNextRun(expr, name) {
   try {
