@@ -1,90 +1,102 @@
 // index.js
 
-import {serve} from '@hono/node-server';
+import { serve } from '@hono/node-server';
 import healthCheckServer from './server.js';
-import {startHealthCheckCron} from './cron.js';
-import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { startHealthCheckCron } from './cron.js';
+import {
+  Client,
+  IntentsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder
+} from 'discord.js';
 import cron from 'node-cron';
-import { Low } from 'lowdb';
-import { JSONFile } from 'lowdb/node';
+import { Low, JSONFile } from 'lowdb';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-// 環境変数チェック
-const { DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID, PORT } = process.env;
+// 環境変数チェック & ポート設定
+const { DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID } = process.env;
+const PORT = process.env.PORT ?? 3000;
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
-  console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
+  console.error(
+    '⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください'
+  );
   process.exit(1);
 }
 
 // デフォルト設定
 const defaultData = {
-  morningTime: '07:00',
-  firstOffset: 60,            // １回目リマインド（分前）
-  secondOffset: 15,           // ２回目リマインド（分前）
-  startAnnouncement: true,    // イベント開始時の @eve
-  // ryone 通知
-  absenceThreshold: 3         // 開始後◯分で不参加チェック
+  morningTime: '07:00',         // 朝リマインドの時刻
+  firstOffset: 60,              // １回目リマインド（分前）
+  secondOffset: 15,             // ２回目リマインド（分前）
+  startAnnouncement: true,      // イベント開始時の @everyone 通知
+  absenceThreshold: 3           // 開始後◯分で不参加チェック
 };
-
 
 // DB 初期化
 const adapter = new JSONFile('settings.json');
-const db = new Low(adapter, defaultData);
-  await db.read();
-  // 既存データがあれば上書きせずにマージする
-  if (!db.data) {
-   db.data = defaultData;
-  } else {
-   db.data = { ...defaultData, ...db.data };
-  }
-  await db.write();
-
+const db = new Low(adapter);
+await db.read();
+db.data = db.data
+  ? { ...defaultData, ...db.data }
+  : defaultData;
+await db.write();
 
 // cron ジョブ管理
 const jobs = [];
 function registerCron(expr, jobFn, desc) {
   console.log(`⏰ Register cron [${expr}] for ${desc}`);
-  const job = cron.schedule(expr, async () => {
-    console.log(`▶ Trigger cron [${expr}] for ${desc} at ${new Date().toLocaleString('ja-JP')}`);
-    try { await jobFn(); } 
-    catch (e) { console.error(`❌ Job error (${desc}):`, e); }
-  }, { timezone: 'Asia/Tokyo' });
+  const job = cron.schedule(
+    expr,
+    async () => {
+      console.log(
+        `▶ Trigger cron [${expr}] for ${desc} at ${new Date().toLocaleString('ja-JP')}`
+      );
+      try {
+        await jobFn();
+      } catch (e) {
+        console.error(`❌ Job error (${desc}):`, e);
+      }
+    },
+    { timezone: 'Asia/Tokyo' }
+  );
   jobs.push(job);
 }
 function clearAllJobs() {
-  jobs.forEach(j => j.stop());
+  jobs.forEach((j) => j.stop());
   jobs.length = 0;
 }
 
 // イベント取得
 async function fetchTodaysEvents(guild) {
   const all = await guild.scheduledEvents.fetch();
-
-  const todayJST = new Date().toLocaleDateString("ja-JP", {
-    timeZone: "Asia/Tokyo"
+  const todayJST = new Date().toLocaleDateString('ja-JP', {
+    timeZone: 'Asia/Tokyo'
   });
 
-  return all.filter(e => {
-    const eventDateJST = new Date(e.scheduledStartTimestamp).toLocaleDateString("ja-JP", {
-      timeZone: "Asia/Tokyo"
+  return all.filter((e) => {
+    const eventDateJST = new Date(e.scheduledStartTimestamp).toLocaleDateString('ja-JP', {
+      timeZone: 'Asia/Tokyo'
     });
     return eventDateJST === todayJST;
   });
 }
+
 async function fetchWeekEvents(guild) {
   const all = await guild.scheduledEvents.fetch();
-
   const today = new Date();
-  const todayJST = new Date(today.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
-  const weekLaterJST = new Date(todayJST);
-  weekLaterJST.setDate(todayJST.getDate() + 7);
+  const todayJST = new Date(today.toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+  const weekLater = new Date(todayJST);
+  weekLater.setDate(todayJST.getDate() + 7);
 
-  return all.filter(e => {
-    const eventDateJST = new Date(new Date(e.scheduledStartTimestamp).toLocaleString("en-US", {
-      timeZone: "Asia/Tokyo"
-    }));
-    return eventDateJST >= todayJST && eventDateJST <= weekLaterJST;
+  return all.filter((e) => {
+    const eventDate = new Date(
+      new Date(e.scheduledStartTimestamp).toLocaleString('en-US', {
+        timeZone: 'Asia/Tokyo'
+      })
+    );
+    return eventDate >= todayJST && eventDate <= weekLater;
   });
 }
 
