@@ -19,6 +19,7 @@ function registerCron(expr, fn, name) {
   }
 
   const job = cron.schedule(expr, fn); // 新しいジョブを登録
+  job.start(); // ✅ 明示的にスタート！
   cronJobs.set(name, job);             // Mapに保存
   console.log(`📌 ジョブ登録: ${name} → ${expr}`);
 }
@@ -339,6 +340,11 @@ client.once('ready', async () => {
 
   console.log('✅ Slash commands registered');
   bootstrapSchedules();
+
+  for (const [name, job] of cronJobs.entries()) {
+    console.log(`🧪 ジョブ: ${name}, running=${job.running}`);
+  }
+
 });
 
 client.on('messageReactionAdd', async (reaction, user) => {
