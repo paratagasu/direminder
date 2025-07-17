@@ -156,9 +156,11 @@ async function sendMorningSummary(force = false) {
   reminderDate = new Date().toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
 }
 function scheduleDailyReminders() {
-  const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':').map(v => parseInt(v));
-  // 朝リマインド
-  const morningExpr = `0 ${m} ${h} * * *`; // ← 秒フィールドを先頭に追加！
+  const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':').map(Number);
+  const morningExpr = `0 ${m} ${h} * * *`; // ✅ 分→時の順で正しい
+
+  console.log(`📌 朝リマインド式: ${morningExpr}`); // ← ここに追加！
+
   registerCron(morningExpr, async () => {
     console.log(`🚀 朝リマインド実行: ${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}`);
     try {
@@ -342,8 +344,9 @@ client.once('ready', async () => {
   bootstrapSchedules();
 
   for (const [name, job] of cronJobs.entries()) {
-    console.log(`🧪 ジョブ: ${name}, running=${job.running}`);
-  }
+  const next = job.nextDates().toString();
+  console.log(`🧪 ジョブ: ${name}, running=${job.running}, next=${next}`);
+}
 
 });
 
