@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server';
 import healthCheckServer from './server.js';
 import { startHealthCheckCron } from './cron.js';
 import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, Partials } from 'discord.js';
-import * as nodeCron from 'node-cron';
+import { schedule } from 'node-cron'; // ✅ named importで確実に本物を使う
 
 const job = nodeCron.schedule('*/1 * * * *', () => {
   console.log('✅ 1分ごとのテストジョブが発火しました');
