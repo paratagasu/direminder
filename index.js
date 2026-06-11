@@ -234,7 +234,7 @@ async function scheduleEventReminders() {
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events  = await fetchTodaysEvents(guild);
 
-  for (const offset of db.data.reminderOffsets) {
+  for (const offset of (db.data.reminderOffsets ?? defaultData.reminderOffsets)) {
     for (const e of events.values()) {
       const target   = new Date(e.scheduledStartTimestamp - offset * 60000);
       const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
@@ -281,7 +281,7 @@ client.on('guildScheduledEventCreate', async event => {
   console.log(`🆕 New scheduled event: "${event.name}"`);
   await createCalendarEvent(event);
 
-  for (const offset of db.data.reminderOffsets) {
+  for (const offset of (db.data.reminderOffsets ?? defaultData.reminderOffsets)) {
     const target   = new Date(event.scheduledStartTimestamp - offset * 60000);
     const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${event.channelId}`;
