@@ -319,7 +319,7 @@ client.on('guildScheduledEventDelete', async event => {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   console.log(`   → morningTime     = ${db.data.morningTime}`);
-  console.log(`   → offsets         = ${db.data.reminderOffsets.join(',')}`);
+  console.log(`   → offsets         = ${(db.data.reminderOffsets ?? []).join(',')}`);
   console.log(`   → calendarEnabled = ${calendarEnabled}`);
 
   const commands = [
