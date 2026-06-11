@@ -345,6 +345,11 @@ client.once('ready', async () => {
     new SlashCommandBuilder()
       .setName('sync-calendar')
       .setDescription('今後のDiscordイベントをGoogleカレンダーに一括同期する'),
+    new SlashCommandBuilder()
+      .setName('send-message')
+      .setDescription('指定チャンネルにメッセージを送信する（管理者専用）')
+      .addChannelOption(opt => opt.setName('channel').setDescription('送信先チャンネル').setRequired(true))
+      .addStringOption(opt => opt.setName('text').setDescription('送信するテキスト').setRequired(true)),
   ].map(cmd => cmd.toJSON());
 
   await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
@@ -419,6 +424,28 @@ client.on('interactionCreate', async interaction => {
         else { await createCalendarEvent(e); created++; }
       }
       return interaction.editReply(`✅ Google Calendar 同期完了\n　新規登録: ${created}件 / 更新: ${updated}件`);
+    }
+
+    case 'send-message': {
+      // 管理者ロールチェック
+      const member = interaction.member;
+      const isAdmin = member?.permissions?.has?.('Administrator') ?? false;
+      if (!isAdmin) {
+        return interaction.reply({ content: '⛔ このコマンドは管理者専用です', ephemeral: true });
+      }
+
+      const targetChannel = interaction.options.getChannel('channel');
+      const text = interaction.options.getString('text');
+
+      try {
+        // 送信先がテキストチャンネルかどうか確認
+        const ch = await client.channels.fetch(targetChannel.id);
+        await ch.send(text);
+        return interaction.reply({ content: `✅ <#${targetChannel.id}> にメッセージを送信しました`, ephemeral: true });
+      } catch (e) {
+        console.error('send-message error:', e);
+        return interaction.reply({ content: `❌ 送信に失敗しました: ${e.message}`, ephemeral: true });
+      }
     }
   }
 });
