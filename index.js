@@ -17,6 +17,7 @@ const {
   DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID,
   GOOGLE_SERVICE_ACCOUNT_KEY,
   GOOGLE_CALENDAR_ID,
+  REMINDER_ROLE_ID,
 } = process.env;
 const PORT = process.env.PORT ?? 3000;
 
@@ -214,9 +215,9 @@ async function sendMorningSummary() {
   const events  = await fetchTodaysEvents(guild);
   if (events.size === 0) { console.log('📭 本日のイベントはありません'); return; }
 
-  let msg = '📅 本日のイベント一覧:\n';
+  let msg = '@everyone\n📅 本日のイベント一覧:\n';
   for (const e of events.values()) {
-    const time     = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP');
+    const time     = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' });
     const host     = e.creator?.username || '不明';
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
@@ -224,7 +225,7 @@ async function sendMorningSummary() {
            `  📍 チャンネル: <${chanUrl}>\n` +
            `  🔗 イベント:   <${eventUrl}>\n`;
   }
-  const reminder = await channel.send({ content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！' });
+  const reminder = await channel.send({ content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！', allowedMentions: { parse: ['everyone'] } });
   await reminder.react('✅');
   await reminder.react('❌');
 }
@@ -237,15 +238,18 @@ async function scheduleEventReminders() {
   for (const offset of (db.data.reminderOffsets ?? defaultData.reminderOffsets)) {
     for (const e of events.values()) {
       const target   = new Date(e.scheduledStartTimestamp - offset * 60000);
-      const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
+      const jst      = new Date(target.getTime() + 9 * 60 * 60 * 1000);
+      const expr     = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
       const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
       const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
       registerCron(expr, async () => {
-        await channel.send(
-          `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
+        const mention = REMINDER_ROLE_ID ? `<@&${REMINDER_ROLE_ID}> ` : '';
+        await channel.send({
+          content: mention + `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
           `📍 チャンネル: <${chanUrl}>\n` +
-          `🔗 イベント:   <${eventUrl}>`
-        );
+          `🔗 イベント:   <${eventUrl}>`,
+          allowedMentions: { roles: REMINDER_ROLE_ID ? [REMINDER_ROLE_ID] : [] }
+        });
       }, `event '${e.name}' -${offset}m`);
     }
   }
@@ -283,16 +287,19 @@ client.on('guildScheduledEventCreate', async event => {
 
   for (const offset of (db.data.reminderOffsets ?? defaultData.reminderOffsets)) {
     const target   = new Date(event.scheduledStartTimestamp - offset * 60000);
-    const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
+    const jst      = new Date(target.getTime() + 9 * 60 * 60 * 1000);
+    const expr     = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${event.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${event.id}`;
     registerCron(expr, async () => {
       const ch = await client.guilds.fetch(GUILD_ID).then(g => g.channels.fetch(ANNOUNCE_CHANNEL_ID));
-      await ch.send(
-        `⏰ **${offset}分前リマインド** 「${event.name}」\n` +
+      const mention = REMINDER_ROLE_ID ? `<@&${REMINDER_ROLE_ID}> ` : '';
+      await ch.send({
+        content: mention + `⏰ **${offset}分前リマインド** 「${event.name}」\n` +
         `📍 チャンネル: <${chanUrl}>\n` +
-        `🔗 イベント:   <${eventUrl}>`
-      );
+        `🔗 イベント:   <${eventUrl}>`,
+        allowedMentions: { roles: REMINDER_ROLE_ID ? [REMINDER_ROLE_ID] : [] }
+      });
     }, `new-event '${event.name}' -${offset}m`);
   }
 });
