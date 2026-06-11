@@ -1,11 +1,12 @@
 // index.js
 
-import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
-import express from 'express';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import cron from 'node-cron';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import { google } from 'googleapis';
+import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
@@ -13,17 +14,20 @@ dotenv.config();
 // 環境変数チェック
 // ============================================================
 const {
-  DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID, PORT,
-  GOOGLE_SERVICE_ACCOUNT_KEY,   // サービスアカウントJSON文字列（環境変数として設定）
-  GOOGLE_CALENDAR_ID,           // 対象カレンダーID
+  DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID,
+  GOOGLE_SERVICE_ACCOUNT_KEY,
+  GOOGLE_CALENDAR_ID,
 } = process.env;
+const PORT = process.env.PORT ?? 3000;
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
   process.exit(1);
 }
 
-// Google Calendar が使えるかチェック（ない場合は警告のみ・起動は続行）
+// ============================================================
+// Google Calendar 初期化
+// ============================================================
 let calendarEnabled = false;
 let calendar = null;
 
@@ -45,42 +49,56 @@ if (GOOGLE_SERVICE_ACCOUNT_KEY && GOOGLE_CALENDAR_ID) {
 }
 
 // ============================================================
-// Express アプリ（スリープ防止用）
+// Hono サーバー（ヘルスチェック用）
 // ============================================================
-const app = express();
-app.get('/', (req, res) => res.send('Bot is alive!'));
-const port = PORT || 3000;
-app.listen(port, () => console.log(`🌐 Web server running on port ${port}`));
+const app = new Hono();
+app.get('/', (c) => c.json({
+  status: 'ok',
+  message: 'Discord Bot is running',
+  node_version: process.version,
+  timestamp: new Date().toISOString(),
+}));
+serve({ fetch: app.fetch, port: PORT });
+console.log(`🌐 Web server running on port ${PORT}`);
+
+// ヘルスチェック cron（10分ごと）
+const HEALTH_CHECK_URL = process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
+cron.schedule('*/10 * * * *', async () => {
+  const now = new Date().toLocaleString('ja-JP');
+  console.log(`🔍 [${now}] ヘルスチェック実行中... (${HEALTH_CHECK_URL})`);
+  try {
+    const res = await fetch(HEALTH_CHECK_URL);
+    if (res.ok) console.log(`✅ [${now}] ヘルスチェック成功: ${res.status}`);
+    else console.warn(`⚠️ [${now}] ヘルスチェック失敗: ${res.status}`);
+  } catch (err) {
+    console.error(`❌ [${now}] ヘルスチェックエラー:`, err);
+  }
+}, { timezone: 'Asia/Tokyo' });
 
 // ============================================================
-// DB 初期化（eventMap を追加）
+// DB 初期化
 // ============================================================
 const defaultData = {
   morningTime: '07:00',
   reminderOffsets: [60, 15],
-  eventMap: {}   // Discord Event ID → Google Calendar Event ID の対応
+  eventMap: {}
 };
 
 const adapter = new JSONFile('settings.json');
 const db = new Low(adapter, defaultData);
 await db.read();
 db.data ||= defaultData;
-// 古いDBにeventMapがなければ追加
 db.data.eventMap ??= {};
 await db.write();
 
 // ============================================================
-// Google Calendar ヘルパー関数
+// Google Calendar ヘルパー
 // ============================================================
-
-/** Discord の GuildScheduledEvent → Google Calendar イベントリソースに変換 */
 function toCalendarEvent(event) {
   const startTime = new Date(event.scheduledStartTimestamp);
-  // 終了時刻がない場合は1時間後をデフォルトとする
   const endTime = event.scheduledEndTimestamp
     ? new Date(event.scheduledEndTimestamp)
     : new Date(startTime.getTime() + 60 * 60 * 1000);
-
   return {
     summary: event.name,
     description: [
@@ -90,14 +108,10 @@ function toCalendarEvent(event) {
     ].join('\n').trim(),
     start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Tokyo' },
     end:   { dateTime: endTime.toISOString(),   timeZone: 'Asia/Tokyo' },
-    // ボイスチャンネル以外のロケーションがあれば場所として登録
-    ...(event.entityMetadata?.location && {
-      location: event.entityMetadata.location
-    }),
+    ...(event.entityMetadata?.location && { location: event.entityMetadata.location }),
   };
 }
 
-/** Google Calendar にイベントを作成し、IDを保存する */
 async function createCalendarEvent(discordEvent) {
   if (!calendarEnabled) return;
   try {
@@ -107,22 +121,16 @@ async function createCalendarEvent(discordEvent) {
     });
     db.data.eventMap[discordEvent.id] = res.data.id;
     await db.write();
-    console.log(`📅 Google Calendar に追加: "${discordEvent.name}" → ${res.data.id}`);
+    console.log(`📅 Google Calendar に追加: "${discordEvent.name}"`);
   } catch (e) {
     console.error(`❌ Google Calendar 作成失敗 ("${discordEvent.name}"):`, e.message);
   }
 }
 
-/** Google Calendar のイベントを更新する */
 async function updateCalendarEvent(discordEvent) {
   if (!calendarEnabled) return;
   const gcalId = db.data.eventMap[discordEvent.id];
-  if (!gcalId) {
-    // DBに記録がない（Bot起動前に作られたイベントなど）→ 新規作成にフォールバック
-    console.log(`ℹ️ "${discordEvent.name}" のCalendar IDが不明のため新規作成します`);
-    await createCalendarEvent(discordEvent);
-    return;
-  }
+  if (!gcalId) { await createCalendarEvent(discordEvent); return; }
   try {
     await calendar.events.patch({
       calendarId: GOOGLE_CALENDAR_ID,
@@ -132,8 +140,6 @@ async function updateCalendarEvent(discordEvent) {
     console.log(`🔄 Google Calendar を更新: "${discordEvent.name}"`);
   } catch (e) {
     if (e.code === 404) {
-      // Calendarから手動削除された場合は再作成
-      console.log(`ℹ️ "${discordEvent.name}" がCalendarに存在しないため再作成します`);
       delete db.data.eventMap[discordEvent.id];
       await db.write();
       await createCalendarEvent(discordEvent);
@@ -143,22 +149,17 @@ async function updateCalendarEvent(discordEvent) {
   }
 }
 
-/** Google Calendar のイベントを削除する */
 async function deleteCalendarEvent(discordEventId, name = '不明') {
   if (!calendarEnabled) return;
   const gcalId = db.data.eventMap[discordEventId];
   if (!gcalId) return;
   try {
-    await calendar.events.delete({
-      calendarId: GOOGLE_CALENDAR_ID,
-      eventId: gcalId,
-    });
+    await calendar.events.delete({ calendarId: GOOGLE_CALENDAR_ID, eventId: gcalId });
     delete db.data.eventMap[discordEventId];
     await db.write();
     console.log(`🗑️ Google Calendar から削除: "${name}"`);
   } catch (e) {
     if (e.code === 410 || e.code === 404) {
-      // すでに削除済みならマップからも消す
       delete db.data.eventMap[discordEventId];
       await db.write();
     } else {
@@ -191,9 +192,7 @@ function clearAllJobs() {
 async function fetchTodaysEvents(guild) {
   const all = await guild.scheduledEvents.fetch();
   const today = new Date().toISOString().slice(0, 10);
-  return all.filter(e =>
-    new Date(e.scheduledStartTimestamp).toISOString().startsWith(today)
-  );
+  return all.filter(e => new Date(e.scheduledStartTimestamp).toISOString().startsWith(today));
 }
 async function fetchWeekEvents(guild) {
   const now = new Date();
@@ -213,10 +212,7 @@ async function sendMorningSummary() {
   const guild   = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events  = await fetchTodaysEvents(guild);
-  if (events.size === 0) {
-    console.log('📭 本日のイベントはありません');
-    return;
-  }
+  if (events.size === 0) { console.log('📭 本日のイベントはありません'); return; }
 
   let msg = '📅 本日のイベント一覧:\n';
   for (const e of events.values()) {
@@ -228,7 +224,6 @@ async function sendMorningSummary() {
            `  📍 チャンネル: <${chanUrl}>\n` +
            `  🔗 イベント:   <${eventUrl}>\n`;
   }
-
   const reminder = await channel.send({ content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！' });
   await reminder.react('✅');
   await reminder.react('❌');
@@ -245,7 +240,6 @@ async function scheduleEventReminders() {
       const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
       const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
       const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-
       registerCron(expr, async () => {
         await channel.send(
           `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
@@ -275,23 +269,18 @@ function bootstrapSchedules() {
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
-    IntentsBitField.Flags.GuildScheduledEvents
+    IntentsBitField.Flags.GuildScheduledEvents,
   ]
 });
 
 // ============================================================
-// リアルタイムイベント検知（Calendar連携を追加）
+// リアルタイムイベント検知
 // ============================================================
-
-/** イベント作成 */
 client.on('guildScheduledEventCreate', async event => {
   if (event.guildId !== GUILD_ID) return;
   console.log(`🆕 New scheduled event: "${event.name}"`);
-
-  // Google Calendar に追加
   await createCalendarEvent(event);
 
-  // 既存のリマインドcron登録
   for (const offset of db.data.reminderOffsets) {
     const target   = new Date(event.scheduledStartTimestamp - offset * 60000);
     const expr     = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
@@ -308,22 +297,16 @@ client.on('guildScheduledEventCreate', async event => {
   }
 });
 
-/** イベント更新（名前・時刻変更、キャンセルなど） */
 client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
   if (newEvent.guildId !== GUILD_ID) return;
-  console.log(`✏️ Updated scheduled event: "${newEvent.name}" (status: ${newEvent.status})`);
-
-  // キャンセルされた場合は削除
-  if (newEvent.status === 4 /* CANCELED */) {
+  console.log(`✏️ Updated scheduled event: "${newEvent.name}"`);
+  if (newEvent.status === 4) {
     await deleteCalendarEvent(newEvent.id, newEvent.name);
     return;
   }
-
-  // それ以外は更新
   await updateCalendarEvent(newEvent);
 });
 
-/** イベント削除 */
 client.on('guildScheduledEventDelete', async event => {
   if (event.guildId !== GUILD_ID) return;
   console.log(`🗑️ Deleted scheduled event: "${event.name}"`);
@@ -335,9 +318,9 @@ client.on('guildScheduledEventDelete', async event => {
 // ============================================================
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`   → morningTime      = ${db.data.morningTime}`);
-  console.log(`   → offsets          = ${db.data.reminderOffsets.join(',')}`);
-  console.log(`   → calendarEnabled  = ${calendarEnabled}`);
+  console.log(`   → morningTime     = ${db.data.morningTime}`);
+  console.log(`   → offsets         = ${db.data.reminderOffsets.join(',')}`);
+  console.log(`   → calendarEnabled = ${calendarEnabled}`);
 
   const commands = [
     new SlashCommandBuilder().setName('ping').setDescription('Bot疎通チェック'),
@@ -398,20 +381,17 @@ client.on('interactionCreate', async interaction => {
     case 'week-events': {
       const guild  = await client.guilds.fetch(GUILD_ID);
       const events = await fetchWeekEvents(guild);
-      if (events.size === 0) {
-        return interaction.reply('📭 今後1週間のイベントはありません');
-      }
+      if (events.size === 0) return interaction.reply('📭 今後1週間のイベントはありません');
 
       let msg = '📆 今後1週間のイベント一覧:\n';
       for (const e of events.values()) {
-        const ts      = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
-          weekday: 'short', year: 'numeric',
-          month: '2-digit', day: '2-digit',
+        const ts = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
+          weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit'
         });
-        const host    = e.creator?.username || '不明';
-        const chanUrl = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
-        const eventUrl= `https://discord.com/events/${GUILD_ID}/${e.id}`;
+        const host     = e.creator?.username || '不明';
+        const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+        const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
         msg += `• ${e.name} / ${ts} / ${host}\n` +
                `  📍 チャンネル: <${chanUrl}>\n` +
                `  🔗 イベント:   <${eventUrl}>\n`;
@@ -419,33 +399,19 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply(msg);
     }
 
-    // ── Google Calendar 一括同期コマンド ──────────────────────
     case 'sync-calendar': {
-      if (!calendarEnabled) {
-        return interaction.reply('⚠️ Google Calendar 連携が設定されていません（`.env` を確認してください）');
-      }
+      if (!calendarEnabled) return interaction.reply('⚠️ Google Calendar 連携が設定されていません');
       await interaction.deferReply();
-
       const guild  = await client.guilds.fetch(GUILD_ID);
       const events = await fetchWeekEvents(guild);
-      if (events.size === 0) {
-        return interaction.editReply('📭 同期するイベントがありません');
-      }
+      if (events.size === 0) return interaction.editReply('📭 同期するイベントがありません');
 
       let created = 0, updated = 0;
       for (const e of events.values()) {
-        if (db.data.eventMap[e.id]) {
-          await updateCalendarEvent(e);
-          updated++;
-        } else {
-          await createCalendarEvent(e);
-          created++;
-        }
+        if (db.data.eventMap[e.id]) { await updateCalendarEvent(e); updated++; }
+        else { await createCalendarEvent(e); created++; }
       }
-      return interaction.editReply(
-        `✅ Google Calendar 同期完了\n` +
-        `　新規登録: ${created}件 / 更新: ${updated}件`
-      );
+      return interaction.editReply(`✅ Google Calendar 同期完了\n　新規登録: ${created}件 / 更新: ${updated}件`);
     }
   }
 });
