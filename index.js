@@ -81,16 +81,18 @@ const defaultData = {
   reminderOffsets: [60, 15],
   eventMap: {},       // Discord Event ID → Google Calendar Event ID
   eventRoles: {},     // Discord Event ID → Discord Role ID
-  lastReminderMsgId: null, // 最新の朝リマインドメッセージID
+  reminderMsgMap: {}, // メッセージID → Discord Event ID（最新リマインドのみ有効）
+  lastReminderMsgIds: [], // 最新の朝リマインドメッセージIDリスト
 };
 
 const adapter = new JSONFile('settings.json');
 const db = new Low(adapter, defaultData);
 await db.read();
 db.data ||= defaultData;
-db.data.eventMap     ??= {};
-db.data.eventRoles   ??= {};
-db.data.lastReminderMsgId ??= null;
+db.data.eventMap        ??= {};
+db.data.eventRoles      ??= {};
+db.data.reminderMsgMap  ??= {};
+db.data.lastReminderMsgIds ??= [];
 // null も考慮してリセット
 if (!Array.isArray(db.data.reminderOffsets)) db.data.reminderOffsets = [60, 15];
 await db.write();
@@ -273,38 +275,42 @@ async function sendMorningSummary(withEveryone = true) {
     return;
   }
 
-  // 各イベントのロールを作成
-  const eventRoleMap = new Map();
-  for (const e of events.values()) {
-    const role = await getOrCreateEventRole(guild, e);
-    eventRoleMap.set(e.id, role);
-  }
+  // イベントごとに個別メッセージを送信
+  const newMsgIds = [];
+  const newMsgMap = {};
 
-  let msg = `${mention}📅 本日のイベント一覧:\n`;
+  // まず全体アナウンス（@everyoneあり）
+  await channel.send({
+    content: `${mention}📅 本日のイベント一覧 (${events.size}件)`,
+    allowedMentions: { parse: withEveryone ? ['everyone'] : [] }
+  });
+
   for (const e of events.values()) {
-    const role     = eventRoleMap.get(e.id);
+    const role     = await getOrCreateEventRole(guild, e);
     const time     = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' });
     const host     = e.creator?.username || '不明';
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-    msg += `\n**${e.name}** / ${time} / ${host}\n` +
-           `  参加表明: ${role}\n` +
-           `  📍 チャンネル: <${chanUrl}>\n` +
-           `  🔗 イベント:   <${eventUrl}>\n`;
+
+    const msg = `**${e.name}** / ${time} / ${host}\n` +
+                `📍 チャンネル: <${chanUrl}>\n` +
+                `🔗 イベント:   <${eventUrl}>\n` +
+                `✅ 出席／❌ 欠席 で参加表明お願いします！`;
+
+    const sent = await channel.send({
+      content: msg,
+      allowedMentions: { roles: [role.id] }
+    });
+    await sent.react('✅');
+    await sent.react('❌');
+
+    newMsgIds.push(sent.id);
+    newMsgMap[sent.id] = e.id;
   }
-  msg += '\n✅ 出席／❌ 欠席 で参加表明お願いします！';
 
-  const reminder = await channel.send({
-    content: msg,
-    allowedMentions: { parse: withEveryone ? ['everyone'] : [], roles: [...eventRoleMap.values()].map(r => r.id) }
-  });
-  await reminder.react('✅');
-  await reminder.react('❌');
-
-  // 最新リマインドメッセージIDを保存（リアクション管理用）
-  db.data.lastReminderMsgId = reminder.id;
-  // イベントIDリストも保存（リアクション→ロール紐付け用）
-  db.data.lastReminderEvents = [...events.values()].map(e => e.id);
+  // 最新リマインドのメッセージID群を保存
+  db.data.lastReminderMsgIds = newMsgIds;
+  db.data.reminderMsgMap = newMsgMap;
   await db.write();
 }
 
@@ -420,26 +426,30 @@ async function handleReaction(reaction, user, add) {
   if (user.bot) return;
   if (reaction.emoji.name !== '✅') return;
 
-  // 最新のリマインドメッセージのみ有効
-  if (reaction.message.id !== db.data.lastReminderMsgId) return;
+  const msgId = reaction.message.id;
+
+  // 最新リマインドのメッセージのみ有効
+  if (!db.data.lastReminderMsgIds?.includes(msgId)) return;
+
+  // このメッセージに対応するイベントIDを取得
+  const eventId = db.data.reminderMsgMap?.[msgId];
+  if (!eventId) return;
 
   const guild  = reaction.message.guild;
   const member = await guild.members.fetch(user.id).catch(() => null);
   if (!member) return;
 
-  const eventIds = db.data.lastReminderEvents ?? [];
-  for (const eventId of eventIds) {
-    const roleId = db.data.eventRoles[eventId];
-    if (!roleId) continue;
-    const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
-    if (!role) continue;
-    if (add) {
-      await member.roles.add(role).catch(() => {});
-      console.log(`✅ ${user.username} に ${role.name} を付与`);
-    } else {
-      await member.roles.remove(role).catch(() => {});
-      console.log(`❌ ${user.username} から ${role.name} を剥奪`);
-    }
+  const roleId = db.data.eventRoles[eventId];
+  if (!roleId) return;
+  const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
+  if (!role) return;
+
+  if (add) {
+    await member.roles.add(role).catch(() => {});
+    console.log(`✅ ${user.username} に ${role.name} を付与`);
+  } else {
+    await member.roles.remove(role).catch(() => {});
+    console.log(`❌ ${user.username} から ${role.name} を剥奪`);
   }
 }
 
