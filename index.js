@@ -6,7 +6,7 @@ import cron from 'node-cron';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import { google } from 'googleapis';
-import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, PermissionFlagsBits } from 'discord.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
@@ -17,7 +17,6 @@ const {
   DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID,
   GOOGLE_SERVICE_ACCOUNT_KEY,
   GOOGLE_CALENDAR_ID,
-  REMINDER_ROLE_ID,
 } = process.env;
 const PORT = process.env.PORT ?? 3000;
 
@@ -46,7 +45,7 @@ if (GOOGLE_SERVICE_ACCOUNT_KEY && GOOGLE_CALENDAR_ID) {
     console.error('⚠️ Google Calendar 初期化失敗（連携なしで起動します）:', e.message);
   }
 } else {
-  console.log('ℹ️ GOOGLE_SERVICE_ACCOUNT_KEY / GOOGLE_CALENDAR_ID が未設定のため Calendar 連携をスキップ');
+  console.log('ℹ️ Google Calendar 連携をスキップ');
 }
 
 // ============================================================
@@ -62,11 +61,9 @@ app.get('/', (c) => c.json({
 serve({ fetch: app.fetch, port: PORT });
 console.log(`🌐 Web server running on port ${PORT}`);
 
-// ヘルスチェック cron（10分ごと）
 const HEALTH_CHECK_URL = process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
 cron.schedule('*/10 * * * *', async () => {
   const now = new Date().toLocaleString('ja-JP');
-  console.log(`🔍 [${now}] ヘルスチェック実行中... (${HEALTH_CHECK_URL})`);
   try {
     const res = await fetch(HEALTH_CHECK_URL);
     if (res.ok) console.log(`✅ [${now}] ヘルスチェック成功: ${res.status}`);
@@ -82,14 +79,20 @@ cron.schedule('*/10 * * * *', async () => {
 const defaultData = {
   morningTime: '07:00',
   reminderOffsets: [60, 15],
-  eventMap: {}
+  eventMap: {},       // Discord Event ID → Google Calendar Event ID
+  eventRoles: {},     // Discord Event ID → Discord Role ID
+  lastReminderMsgId: null, // 最新の朝リマインドメッセージID
 };
 
 const adapter = new JSONFile('settings.json');
 const db = new Low(adapter, defaultData);
 await db.read();
 db.data ||= defaultData;
-db.data.eventMap ??= {};
+db.data.eventMap     ??= {};
+db.data.eventRoles   ??= {};
+db.data.lastReminderMsgId ??= null;
+// null も考慮してリセット
+if (!Array.isArray(db.data.reminderOffsets)) db.data.reminderOffsets = [60, 15];
 await db.write();
 
 // ============================================================
@@ -116,16 +119,11 @@ function toCalendarEvent(event) {
 async function createCalendarEvent(discordEvent) {
   if (!calendarEnabled) return;
   try {
-    const res = await calendar.events.insert({
-      calendarId: GOOGLE_CALENDAR_ID,
-      resource: toCalendarEvent(discordEvent),
-    });
+    const res = await calendar.events.insert({ calendarId: GOOGLE_CALENDAR_ID, resource: toCalendarEvent(discordEvent) });
     db.data.eventMap[discordEvent.id] = res.data.id;
     await db.write();
     console.log(`📅 Google Calendar に追加: "${discordEvent.name}"`);
-  } catch (e) {
-    console.error(`❌ Google Calendar 作成失敗 ("${discordEvent.name}"):`, e.message);
-  }
+  } catch (e) { console.error(`❌ Google Calendar 作成失敗:`, e.message); }
 }
 
 async function updateCalendarEvent(discordEvent) {
@@ -133,20 +131,11 @@ async function updateCalendarEvent(discordEvent) {
   const gcalId = db.data.eventMap[discordEvent.id];
   if (!gcalId) { await createCalendarEvent(discordEvent); return; }
   try {
-    await calendar.events.patch({
-      calendarId: GOOGLE_CALENDAR_ID,
-      eventId: gcalId,
-      resource: toCalendarEvent(discordEvent),
-    });
+    await calendar.events.patch({ calendarId: GOOGLE_CALENDAR_ID, eventId: gcalId, resource: toCalendarEvent(discordEvent) });
     console.log(`🔄 Google Calendar を更新: "${discordEvent.name}"`);
   } catch (e) {
-    if (e.code === 404) {
-      delete db.data.eventMap[discordEvent.id];
-      await db.write();
-      await createCalendarEvent(discordEvent);
-    } else {
-      console.error(`❌ Google Calendar 更新失敗 ("${discordEvent.name}"):`, e.message);
-    }
+    if (e.code === 404) { delete db.data.eventMap[discordEvent.id]; await db.write(); await createCalendarEvent(discordEvent); }
+    else console.error(`❌ Google Calendar 更新失敗:`, e.message);
   }
 }
 
@@ -160,13 +149,66 @@ async function deleteCalendarEvent(discordEventId, name = '不明') {
     await db.write();
     console.log(`🗑️ Google Calendar から削除: "${name}"`);
   } catch (e) {
-    if (e.code === 410 || e.code === 404) {
-      delete db.data.eventMap[discordEventId];
-      await db.write();
-    } else {
-      console.error(`❌ Google Calendar 削除失敗 ("${name}"):`, e.message);
+    if (e.code === 410 || e.code === 404) { delete db.data.eventMap[discordEventId]; await db.write(); }
+    else console.error(`❌ Google Calendar 削除失敗:`, e.message);
+  }
+}
+
+// ============================================================
+// イベントごとのロール管理
+// ============================================================
+
+/** イベント用ロールを取得または作成する */
+async function getOrCreateEventRole(guild, event) {
+  const existingRoleId = db.data.eventRoles[event.id];
+  if (existingRoleId) {
+    const role = guild.roles.cache.get(existingRoleId) || await guild.roles.fetch(existingRoleId).catch(() => null);
+    if (role) return role;
+  }
+  // ロールを新規作成
+  const role = await guild.roles.create({
+    name: `参加予定_${event.name}`,
+    color: 0x57F287,
+    reason: `Discordイベント「${event.name}」の参加予定者管理用`,
+  });
+  db.data.eventRoles[event.id] = role.id;
+  await db.write();
+  console.log(`🎭 ロール作成: "${role.name}"`);
+  return role;
+}
+
+/** イベント用ロールを削除する */
+async function deleteEventRole(guild, eventId, eventName = '不明') {
+  const roleId = db.data.eventRoles[eventId];
+  if (!roleId) return;
+  try {
+    const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
+    if (role) await role.delete(`イベント「${eventName}」終了のため`);
+    delete db.data.eventRoles[eventId];
+    await db.write();
+    console.log(`🗑️ ロール削除: 参加予定_${eventName}`);
+  } catch (e) {
+    console.error(`❌ ロール削除失敗:`, e.message);
+    delete db.data.eventRoles[eventId];
+    await db.write();
+  }
+}
+
+/** 全ての参加予定ロールをメンバーから剥奪（ロール自体は残す） */
+async function stripAllEventRoles(guild) {
+  for (const [eventId, roleId] of Object.entries(db.data.eventRoles)) {
+    try {
+      const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
+      if (!role) continue;
+      const members = role.members;
+      for (const member of members.values()) {
+        await member.roles.remove(role).catch(() => {});
+      }
+    } catch (e) {
+      console.error(`❌ ロール剥奪失敗 (${roleId}):`, e.message);
     }
   }
+  console.log('🧹 全参加予定ロールを剥奪しました');
 }
 
 // ============================================================
@@ -192,9 +234,15 @@ function clearAllJobs() {
 // ============================================================
 async function fetchTodaysEvents(guild) {
   const all = await guild.scheduledEvents.fetch();
-  const today = new Date().toISOString().slice(0, 10);
-  return all.filter(e => new Date(e.scheduledStartTimestamp).toISOString().startsWith(today));
+  const todayJST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+  const todayStr = `${todayJST.getFullYear()}-${String(todayJST.getMonth()+1).padStart(2,'0')}-${String(todayJST.getDate()).padStart(2,'0')}`;
+  return all.filter(e => {
+    const d = new Date(new Date(e.scheduledStartTimestamp).toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+    const s = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    return s === todayStr;
+  });
 }
+
 async function fetchWeekEvents(guild) {
   const now = new Date();
   const weekLater = new Date(now);
@@ -207,57 +255,140 @@ async function fetchWeekEvents(guild) {
 }
 
 // ============================================================
-// リマインドロジック
+// 朝リマインド送信
 // ============================================================
-async function sendMorningSummary() {
+async function sendMorningSummary(withEveryone = true) {
   const guild   = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   const events  = await fetchTodaysEvents(guild);
-  if (events.size === 0) { console.log('📭 本日のイベントはありません'); return; }
 
-  let msg = '@everyone\n📅 本日のイベント一覧:\n';
+  // 前日の参加予定ロールを全員から剥奪
+  await stripAllEventRoles(guild);
+
+  const mention = withEveryone ? '@everyone\n' : '';
+
+  if (events.size === 0) {
+    await channel.send({ content: `${mention}📭 本日のイベントはありません`, allowedMentions: { parse: withEveryone ? ['everyone'] : [] } });
+    console.log('📭 本日のイベントはありません');
+    return;
+  }
+
+  // 各イベントのロールを作成
+  const eventRoleMap = new Map();
   for (const e of events.values()) {
+    const role = await getOrCreateEventRole(guild, e);
+    eventRoleMap.set(e.id, role);
+  }
+
+  let msg = `${mention}📅 本日のイベント一覧:\n`;
+  for (const e of events.values()) {
+    const role     = eventRoleMap.get(e.id);
     const time     = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' });
     const host     = e.creator?.username || '不明';
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-    msg += `• ${e.name} / ${time} / ${host}\n` +
+    msg += `\n**${e.name}** / ${time} / ${host}\n` +
+           `  参加表明: ${role}\n` +
            `  📍 チャンネル: <${chanUrl}>\n` +
            `  🔗 イベント:   <${eventUrl}>\n`;
   }
-  const reminder = await channel.send({ content: msg + '\n✅ 出席／❌ 欠席 で参加表明お願いします！', allowedMentions: { parse: ['everyone'] } });
+  msg += '\n✅ 出席／❌ 欠席 で参加表明お願いします！';
+
+  const reminder = await channel.send({
+    content: msg,
+    allowedMentions: { parse: withEveryone ? ['everyone'] : [], roles: [...eventRoleMap.values()].map(r => r.id) }
+  });
   await reminder.react('✅');
   await reminder.react('❌');
+
+  // 最新リマインドメッセージIDを保存（リアクション管理用）
+  db.data.lastReminderMsgId = reminder.id;
+  // イベントIDリストも保存（リアクション→ロール紐付け用）
+  db.data.lastReminderEvents = [...events.values()].map(e => e.id);
+  await db.write();
 }
 
+// ============================================================
+// イベントリマインドcron登録
+// ============================================================
 async function scheduleEventReminders() {
-  const guild   = await client.guilds.fetch(GUILD_ID);
-  const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
-  const events  = await fetchTodaysEvents(guild);
+  const guild  = await client.guilds.fetch(GUILD_ID);
+  const events = await fetchTodaysEvents(guild);
 
   for (const offset of (db.data.reminderOffsets ?? defaultData.reminderOffsets)) {
     for (const e of events.values()) {
-      const target   = new Date(e.scheduledStartTimestamp - offset * 60000);
-      const jst      = new Date(target.getTime() + 9 * 60 * 60 * 1000);
-      const expr     = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+      const target = new Date(e.scheduledStartTimestamp - offset * 60000);
+      const jst    = new Date(target.getTime() + 9 * 60 * 60 * 1000);
+      const expr   = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
       const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
       const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
+
       registerCron(expr, async () => {
-        const mention = REMINDER_ROLE_ID ? `<@&${REMINDER_ROLE_ID}> ` : '';
-        await channel.send({
-          content: mention + `⏰ **${offset}分前リマインド** 「${e.name}」\n` +
-          `📍 チャンネル: <${chanUrl}>\n` +
-          `🔗 イベント:   <${eventUrl}>`,
-          allowedMentions: { roles: REMINDER_ROLE_ID ? [REMINDER_ROLE_ID] : [] }
+        const g    = await client.guilds.fetch(GUILD_ID);
+        const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
+        const role = await getOrCreateEventRole(g, e);
+        await ch.send({
+          content: `${role} ⏰ **${offset}分前リマインド** 「${e.name}」\n` +
+                   `📍 チャンネル: <${chanUrl}>\n` +
+                   `🔗 イベント:   <${eventUrl}>`,
+          allowedMentions: { roles: [role.id] }
         });
       }, `event '${e.name}' -${offset}m`);
     }
+  }
+
+  // イベント開始時アナウンス
+  for (const e of events.values()) {
+    const start = new Date(e.scheduledStartTimestamp);
+    const jst   = new Date(start.getTime() + 9 * 60 * 60 * 1000);
+    const expr  = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+    const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+    const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
+
+    registerCron(expr, async () => {
+      const g    = await client.guilds.fetch(GUILD_ID);
+      const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
+      const role = await getOrCreateEventRole(g, e);
+      await ch.send({
+        content: `${role} 🚀 **「${e.name}」が始まりました！**\n` +
+                 `📍 会場チャンネル: <${chanUrl}>\n` +
+                 `🔗 イベントリンク: <${eventUrl}>`,
+        allowedMentions: { roles: [role.id] }
+      });
+    }, `start-announcement '${e.name}'`);
+
+    // 開始3分後の未参加チェック
+    const check = new Date(e.scheduledStartTimestamp + 3 * 60000);
+    const jstC  = new Date(check.getTime() + 9 * 60 * 60 * 1000);
+    const exprC = `${jstC.getUTCMinutes()} ${jstC.getUTCHours()} ${jstC.getUTCDate()} ${jstC.getUTCMonth() + 1} *`;
+
+    registerCron(exprC, async () => {
+      const g    = await client.guilds.fetch(GUILD_ID);
+      const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
+      const role = await getOrCreateEventRole(g, e);
+
+      // イベントのVCチャンネルを取得
+      const vcChannel = e.channelId ? await g.channels.fetch(e.channelId).catch(() => null) : null;
+      if (!vcChannel) return;
+
+      // VCに参加していない参加予定者を抽出
+      const vcMemberIds = new Set(vcChannel.members?.keys() ?? []);
+      const absentees = role.members.filter(m => !vcMemberIds.has(m.id));
+
+      if (absentees.size === 0) return;
+
+      const mentions = absentees.map(m => `<@${m.id}>`).join('\n');
+      await ch.send({
+        content: `⚠️ 以下の出席予定者が参加していません:\n${mentions}`,
+        allowedMentions: { users: [...absentees.keys()] }
+      });
+    }, `absence-check '${e.name}' +3m`);
   }
 }
 
 function scheduleDailyReminders() {
   const [h, m] = (db.data.morningTime || defaultData.morningTime).split(':');
-  registerCron(`0 ${m} ${h} * * *`, sendMorningSummary, 'morning summary');
+  registerCron(`0 ${m} ${h} * * *`, () => sendMorningSummary(true), 'morning summary');
   registerCron('0 0 * * *', scheduleEventReminders, 'reschedule events');
 }
 
@@ -273,9 +404,47 @@ function bootstrapSchedules() {
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
+    IntentsBitField.Flags.GuildMembers,
+    IntentsBitField.Flags.GuildMessageReactions,
+    IntentsBitField.Flags.GuildMessages,
     IntentsBitField.Flags.GuildScheduledEvents,
+    IntentsBitField.Flags.GuildVoiceStates,
+    IntentsBitField.Flags.MessageContent,
   ]
 });
+
+// ============================================================
+// リアクションでロール付与/剥奪
+// ============================================================
+async function handleReaction(reaction, user, add) {
+  if (user.bot) return;
+  if (reaction.emoji.name !== '✅') return;
+
+  // 最新のリマインドメッセージのみ有効
+  if (reaction.message.id !== db.data.lastReminderMsgId) return;
+
+  const guild  = reaction.message.guild;
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  if (!member) return;
+
+  const eventIds = db.data.lastReminderEvents ?? [];
+  for (const eventId of eventIds) {
+    const roleId = db.data.eventRoles[eventId];
+    if (!roleId) continue;
+    const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
+    if (!role) continue;
+    if (add) {
+      await member.roles.add(role).catch(() => {});
+      console.log(`✅ ${user.username} に ${role.name} を付与`);
+    } else {
+      await member.roles.remove(role).catch(() => {});
+      console.log(`❌ ${user.username} から ${role.name} を剥奪`);
+    }
+  }
+}
+
+client.on('messageReactionAdd',    (reaction, user) => handleReaction(reaction, user, true));
+client.on('messageReactionRemove', (reaction, user) => handleReaction(reaction, user, false));
 
 // ============================================================
 // リアルタイムイベント検知
@@ -286,19 +455,20 @@ client.on('guildScheduledEventCreate', async event => {
   await createCalendarEvent(event);
 
   for (const offset of (db.data.reminderOffsets ?? defaultData.reminderOffsets)) {
-    const target   = new Date(event.scheduledStartTimestamp - offset * 60000);
-    const jst      = new Date(target.getTime() + 9 * 60 * 60 * 1000);
-    const expr     = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+    const target = new Date(event.scheduledStartTimestamp - offset * 60000);
+    const jst    = new Date(target.getTime() + 9 * 60 * 60 * 1000);
+    const expr   = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${event.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${event.id}`;
     registerCron(expr, async () => {
-      const ch = await client.guilds.fetch(GUILD_ID).then(g => g.channels.fetch(ANNOUNCE_CHANNEL_ID));
-      const mention = REMINDER_ROLE_ID ? `<@&${REMINDER_ROLE_ID}> ` : '';
+      const g    = await client.guilds.fetch(GUILD_ID);
+      const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
+      const role = await getOrCreateEventRole(g, event);
       await ch.send({
-        content: mention + `⏰ **${offset}分前リマインド** 「${event.name}」\n` +
-        `📍 チャンネル: <${chanUrl}>\n` +
-        `🔗 イベント:   <${eventUrl}>`,
-        allowedMentions: { roles: REMINDER_ROLE_ID ? [REMINDER_ROLE_ID] : [] }
+        content: `${role} ⏰ **${offset}分前リマインド** 「${event.name}」\n` +
+                 `📍 チャンネル: <${chanUrl}>\n` +
+                 `🔗 イベント:   <${eventUrl}>`,
+        allowedMentions: { roles: [role.id] }
       });
     }, `new-event '${event.name}' -${offset}m`);
   }
@@ -306,8 +476,9 @@ client.on('guildScheduledEventCreate', async event => {
 
 client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
   if (newEvent.guildId !== GUILD_ID) return;
-  console.log(`✏️ Updated scheduled event: "${newEvent.name}"`);
   if (newEvent.status === 4) {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    await deleteEventRole(guild, newEvent.id, newEvent.name);
     await deleteCalendarEvent(newEvent.id, newEvent.name);
     return;
   }
@@ -316,7 +487,8 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
 
 client.on('guildScheduledEventDelete', async event => {
   if (event.guildId !== GUILD_ID) return;
-  console.log(`🗑️ Deleted scheduled event: "${event.name}"`);
+  const guild = await client.guilds.fetch(GUILD_ID);
+  await deleteEventRole(guild, event.id, event.name);
   await deleteCalendarEvent(event.id, event.name);
 });
 
@@ -336,15 +508,28 @@ client.once('ready', async () => {
       .setDescription('朝リマインドの時刻を設定')
       .addStringOption(opt => opt.setName('time').setDescription('HH:MM形式').setRequired(true)),
     new SlashCommandBuilder()
-      .setName('set-reminder-offset')
-      .setDescription('イベントリマインドの分前を設定')
+      .setName('add-reminder-offset')
+      .setDescription('リマインド時刻を追加（例: 60分前）')
       .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('remove-reminder-offset')
+      .setDescription('リマインド時刻を削除')
+      .addIntegerOption(opt => opt.setName('minutes').setDescription('何分前').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('list-reminder-offsets')
+      .setDescription('現在のリマインド時刻一覧を表示'),
     new SlashCommandBuilder()
       .setName('week-events')
       .setDescription('直近1週間のイベント一覧を表示'),
     new SlashCommandBuilder()
       .setName('sync-calendar')
       .setDescription('今後のDiscordイベントをGoogleカレンダーに一括同期する'),
+    new SlashCommandBuilder()
+      .setName('force-remind')
+      .setDescription('朝リマインドを今すぐ送信する（@everyoneあり）'),
+    new SlashCommandBuilder()
+      .setName('n-force-remind')
+      .setDescription('朝リマインドを今すぐ送信する（@everyoneなし）'),
     new SlashCommandBuilder()
       .setName('send-message')
       .setDescription('指定チャンネルにメッセージを送信する（管理者専用）')
@@ -382,24 +567,49 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply(`✅ 朝リマインドを **${time}** に設定し再登録しました`);
     }
 
-    case 'set-reminder-offset': {
+    case 'add-reminder-offset': {
       const min = interaction.options.getInteger('minutes');
-      db.data.reminderOffsets = [min];
-      await db.write();
-      bootstrapSchedules();
-      return interaction.reply(`✅ リマインドを **${min}分前** に設定し再登録しました`);
+      db.data.reminderOffsets ??= [];
+      if (!db.data.reminderOffsets.includes(min)) {
+        db.data.reminderOffsets.push(min);
+        db.data.reminderOffsets.sort((a, b) => b - a); // 降順ソート
+        await db.write();
+        bootstrapSchedules();
+        return interaction.reply(`✅ **${min}分前** リマインドを追加しました（現在: ${db.data.reminderOffsets.join(', ')}分前）`);
+      } else {
+        return interaction.reply(`ℹ️ **${min}分前** はすでに設定されています（現在: ${db.data.reminderOffsets.join(', ')}分前）`);
+      }
+    }
+
+    case 'remove-reminder-offset': {
+      const min = interaction.options.getInteger('minutes');
+      db.data.reminderOffsets ??= [];
+      const idx = db.data.reminderOffsets.indexOf(min);
+      if (idx !== -1) {
+        db.data.reminderOffsets.splice(idx, 1);
+        await db.write();
+        bootstrapSchedules();
+        return interaction.reply(`✅ **${min}分前** リマインドを削除しました（現在: ${db.data.reminderOffsets.join(', ')}分前）`);
+      } else {
+        return interaction.reply(`ℹ️ **${min}分前** は設定されていません（現在: ${db.data.reminderOffsets.join(', ')}分前）`);
+      }
+    }
+
+    case 'list-reminder-offsets': {
+      const offsets = db.data.reminderOffsets ?? [];
+      if (offsets.length === 0) return interaction.reply('📭 リマインド時刻が設定されていません');
+      return interaction.reply(`⏰ 現在のリマインド設定: **${offsets.join(', ')}分前**`);
     }
 
     case 'week-events': {
       const guild  = await client.guilds.fetch(GUILD_ID);
       const events = await fetchWeekEvents(guild);
       if (events.size === 0) return interaction.reply('📭 今後1週間のイベントはありません');
-
       let msg = '📆 今後1週間のイベント一覧:\n';
       for (const e of events.values()) {
         const ts = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
           weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit'
+          hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo'
         });
         const host     = e.creator?.username || '不明';
         const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
@@ -417,7 +627,6 @@ client.on('interactionCreate', async interaction => {
       const guild  = await client.guilds.fetch(GUILD_ID);
       const events = await fetchWeekEvents(guild);
       if (events.size === 0) return interaction.editReply('📭 同期するイベントがありません');
-
       let created = 0, updated = 0;
       for (const e of events.values()) {
         if (db.data.eventMap[e.id]) { await updateCalendarEvent(e); updated++; }
@@ -426,24 +635,29 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply(`✅ Google Calendar 同期完了\n　新規登録: ${created}件 / 更新: ${updated}件`);
     }
 
+    case 'force-remind': {
+      await interaction.deferReply({ ephemeral: true });
+      await sendMorningSummary(true);
+      return interaction.editReply('✅ リマインドを送信しました（@everyoneあり）');
+    }
+
+    case 'n-force-remind': {
+      await interaction.deferReply({ ephemeral: true });
+      await sendMorningSummary(false);
+      return interaction.editReply('✅ リマインドを送信しました（@everyoneなし）');
+    }
+
     case 'send-message': {
-      // 管理者ロールチェック
       const member = interaction.member;
       const isAdmin = member?.permissions?.has?.('Administrator') ?? false;
-      if (!isAdmin) {
-        return interaction.reply({ content: '⛔ このコマンドは管理者専用です', ephemeral: true });
-      }
-
+      if (!isAdmin) return interaction.reply({ content: '⛔ このコマンドは管理者専用です', ephemeral: true });
       const targetChannel = interaction.options.getChannel('channel');
       const text = interaction.options.getString('text');
-
       try {
-        // 送信先がテキストチャンネルかどうか確認
         const ch = await client.channels.fetch(targetChannel.id);
         await ch.send(text);
         return interaction.reply({ content: `✅ <#${targetChannel.id}> にメッセージを送信しました`, ephemeral: true });
       } catch (e) {
-        console.error('send-message error:', e);
         return interaction.reply({ content: `❌ 送信に失敗しました: ${e.message}`, ephemeral: true });
       }
     }
