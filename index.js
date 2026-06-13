@@ -83,6 +83,7 @@ const defaultData = {
   eventRoles: {},     // Discord Event ID → Discord Role ID
   reminderMsgMap: {}, // メッセージID → Discord Event ID（最新リマインドのみ有効）
   lastReminderMsgIds: [], // 最新の朝リマインドメッセージIDリスト
+  vcParticipants: {}, // Discord Event ID → 参加者IDセット
 };
 
 const adapter = new JSONFile('settings.json');
@@ -93,6 +94,7 @@ db.data.eventMap        ??= {};
 db.data.eventRoles      ??= {};
 db.data.reminderMsgMap  ??= {};
 db.data.lastReminderMsgIds ??= [];
+db.data.vcParticipants  ??= {};
 // null も考慮してリセット
 if (!Array.isArray(db.data.reminderOffsets)) db.data.reminderOffsets = [60, 15];
 await db.write();
@@ -153,6 +155,45 @@ async function deleteCalendarEvent(discordEventId, name = '不明') {
   } catch (e) {
     if (e.code === 410 || e.code === 404) { delete db.data.eventMap[discordEventId]; await db.write(); }
     else console.error(`❌ Google Calendar 削除失敗:`, e.message);
+  }
+}
+
+// ============================================================
+// イベント終了時に参加者をGoogleカレンダーに書き込む
+// ============================================================
+async function writeParticipantsToCalendar(discordEvent) {
+  if (!calendarEnabled) return;
+  const gcalId = db.data.eventMap[discordEvent.id];
+  if (!gcalId) return;
+
+  const participantIds = db.data.vcParticipants[discordEvent.id] ?? [];
+  if (participantIds.length === 0) {
+    console.log(`📝 参加者なし: "${discordEvent.name}"`);
+    return;
+  }
+
+  try {
+    // メンバー名を取得
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const names = [];
+    for (const userId of participantIds) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) names.push(member.displayName);
+    }
+
+    // 既存のイベント説明を取得して参加者を追記
+    const existing = await calendar.events.get({ calendarId: GOOGLE_CALENDAR_ID, eventId: gcalId });
+    const oldDesc = existing.data.description || '';
+    const newDesc = oldDesc + `\n\n🎙️ 参加者 (${names.length}名):\n` + names.map(n => `・${n}`).join('\n');
+
+    await calendar.events.patch({
+      calendarId: GOOGLE_CALENDAR_ID,
+      eventId: gcalId,
+      resource: { description: newDesc },
+    });
+    console.log(`📝 参加者をCalendarに書き込み: "${discordEvent.name}" (${names.length}名)`);
+  } catch (e) {
+    console.error(`❌ 参加者書き込み失敗:`, e.message);
   }
 }
 
@@ -292,7 +333,8 @@ async function sendMorningSummary(withEveryone = true) {
     const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
 
-    const msg = `**${e.name}** / ${time} / ${host}\n` +
+    const msg = `## ◆${e.name}\n` +
+                `${time} / ${host}\n` +
                 `📍 チャンネル: <${chanUrl}>\n` +
                 `🔗 イベント:   <${eventUrl}>\n` +
                 `✅ 出席／❌ 欠席 で参加表明お願いします！`;
@@ -334,7 +376,7 @@ async function scheduleEventReminders() {
         const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
         const role = await getOrCreateEventRole(g, e);
         await ch.send({
-          content: `${role} ⏰ **${offset}分前リマインド** 「${e.name}」\n` +
+          content: `${role}\n⏰ **${offset}分前リマインド** 「${e.name}」\n` +
                    `📍 チャンネル: <${chanUrl}>\n` +
                    `🔗 イベント:   <${eventUrl}>`,
           allowedMentions: { roles: [role.id] }
@@ -356,10 +398,10 @@ async function scheduleEventReminders() {
       const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       const role = await getOrCreateEventRole(g, e);
       await ch.send({
-        content: `${role} 🚀 **「${e.name}」が始まりました！**\n` +
+        content: `@everyone\n🚀 **「${e.name}」が始まりました！**\n` +
                  `📍 会場チャンネル: <${chanUrl}>\n` +
                  `🔗 イベントリンク: <${eventUrl}>`,
-        allowedMentions: { roles: [role.id] }
+        allowedMentions: { parse: ['everyone'] }
       });
     }, `start-announcement '${e.name}'`);
 
@@ -457,6 +499,34 @@ client.on('messageReactionAdd',    (reaction, user) => handleReaction(reaction, 
 client.on('messageReactionRemove', (reaction, user) => handleReaction(reaction, user, false));
 
 // ============================================================
+// VCへの参加を記録（イベントのVCチャンネルへの入室のみ）
+// ============================================================
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  if (newState.guild.id !== GUILD_ID) return;
+  const userId = newState.id;
+  if (!newState.channelId || newState.channelId === oldState.channelId) return;
+
+  // 今日のイベントのVCチャンネルと照合
+  try {
+    const guild = newState.guild;
+    const all = await guild.scheduledEvents.fetch();
+    for (const e of all.values()) {
+      if (e.channelId === newState.channelId) {
+        if (!db.data.vcParticipants[e.id]) db.data.vcParticipants[e.id] = [];
+        const list = db.data.vcParticipants[e.id];
+        if (!list.includes(userId)) {
+          list.push(userId);
+          await db.write();
+          console.log(`🎙️ VC参加記録: ${userId} → イベント「${e.name}」`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('voiceStateUpdate error:', err);
+  }
+});
+
+// ============================================================
 // リアルタイムイベント検知
 // ============================================================
 client.on('guildScheduledEventCreate', async event => {
@@ -475,7 +545,7 @@ client.on('guildScheduledEventCreate', async event => {
       const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       const role = await getOrCreateEventRole(g, event);
       await ch.send({
-        content: `${role} ⏰ **${offset}分前リマインド** 「${event.name}」\n` +
+        content: `${role}\n⏰ **${offset}分前リマインド** 「${event.name}」\n` +
                  `📍 チャンネル: <${chanUrl}>\n` +
                  `🔗 イベント:   <${eventUrl}>`,
         allowedMentions: { roles: [role.id] }
@@ -486,12 +556,27 @@ client.on('guildScheduledEventCreate', async event => {
 
 client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
   if (newEvent.guildId !== GUILD_ID) return;
+
+  // キャンセル
   if (newEvent.status === 4) {
     const guild = await client.guilds.fetch(GUILD_ID);
     await deleteEventRole(guild, newEvent.id, newEvent.name);
     await deleteCalendarEvent(newEvent.id, newEvent.name);
+    delete db.data.vcParticipants[newEvent.id];
+    await db.write();
     return;
   }
+
+  // 完了（COMPLETED = 3）→ 参加者をGoogleカレンダーに書き込み
+  if (newEvent.status === 3 && oldEvent.status !== 3) {
+    await writeParticipantsToCalendar(newEvent);
+    const guild = await client.guilds.fetch(GUILD_ID);
+    await deleteEventRole(guild, newEvent.id, newEvent.name);
+    delete db.data.vcParticipants[newEvent.id];
+    await db.write();
+    return;
+  }
+
   await updateCalendarEvent(newEvent);
 });
 
