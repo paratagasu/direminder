@@ -242,16 +242,19 @@ async function stripAllEventRoles(guild) {
   for (const [eventId, roleId] of Object.entries(db.data.eventRoles)) {
     try {
       const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
-      if (!role) continue;
-      const members = role.members;
-      for (const member of members.values()) {
-        await member.roles.remove(role).catch(() => {});
+      if (!role) {
+        delete db.data.eventRoles[eventId];
+        continue;
       }
+      await role.delete('毎朝リマインド時の前日ロール削除').catch(() => {});
+      delete db.data.eventRoles[eventId];
+      console.log(`🗑️ ロール削除: ${role.name}`);
     } catch (e) {
-      console.error(`❌ ロール剥奪失敗 (${roleId}):`, e.message);
+      console.error(`❌ ロール削除失敗 (${roleId}):`, e.message);
     }
   }
-  console.log('🧹 全参加予定ロールを剥奪しました');
+  await db.write();
+  console.log('🧹 前日の参加予定ロールを全削除しました');
 }
 
 // ============================================================
