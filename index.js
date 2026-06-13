@@ -239,20 +239,19 @@ async function deleteEventRole(guild, eventId, eventName = '不明') {
 
 /** 全ての参加予定ロールをメンバーから剥奪（ロール自体は残す） */
 async function stripAllEventRoles(guild) {
-  for (const [eventId, roleId] of Object.entries(db.data.eventRoles)) {
+  // DBに頼らず「参加予定_」プレフィックスのロールを名前で検索して全削除
+  await guild.roles.fetch(); // キャッシュ更新
+  const targetRoles = guild.roles.cache.filter(r => r.name.startsWith('参加予定_'));
+  for (const role of targetRoles.values()) {
     try {
-      const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
-      if (!role) {
-        delete db.data.eventRoles[eventId];
-        continue;
-      }
-      await role.delete('毎朝リマインド時の前日ロール削除').catch(() => {});
-      delete db.data.eventRoles[eventId];
+      await role.delete('毎朝リマインド時の前日ロール削除');
       console.log(`🗑️ ロール削除: ${role.name}`);
     } catch (e) {
-      console.error(`❌ ロール削除失敗 (${roleId}):`, e.message);
+      console.error(`❌ ロール削除失敗 (${role.name}):`, e.message);
     }
   }
+  // DBのeventRolesもクリア
+  db.data.eventRoles = {};
   await db.write();
   console.log('🧹 前日の参加予定ロールを全削除しました');
 }
