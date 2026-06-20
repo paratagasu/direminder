@@ -657,10 +657,10 @@ client.once('ready', async () => {
       .setName('n-force-remind')
       .setDescription('朝リマインドを今すぐ送信する（@everyoneなし）'),
     new SlashCommandBuilder()
-      .setName('send-message')
-      .setDescription('指定チャンネルにメッセージを送信する（管理者専用）')
-      .addChannelOption(opt => opt.setName('channel').setDescription('送信先チャンネル').setRequired(true))
-      .addStringOption(opt => opt.setName('text').setDescription('送信するテキスト').setRequired(true)),
+      .setName('connection-change')
+      .setDescription('チャンネルの接続設定を変更する')
+      .addChannelOption(opt => opt.setName('channel').setDescription('対象チャンネル').setRequired(true))
+      .addStringOption(opt => opt.setName('serial-number').setDescription('シリアルナンバー').setRequired(true)),
     new SlashCommandBuilder()
       .setName('random-katakana')
       .setDescription('ランダムなカタカナ文字列を生成して送信する')
@@ -788,18 +788,18 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply('✅ リマインドを送信しました（@everyoneなし）');
     }
 
-    case 'send-message': {
+    case 'connection-change': {
       const member = interaction.member;
       const isAdmin = member?.permissions?.has?.('Administrator') ?? false;
-      if (!isAdmin) return interaction.reply({ content: '⛔ このコマンドは管理者専用です', flags: 64 });
+      if (!isAdmin) return interaction.reply({ content: '⛔ 権限がありません', flags: 64 });
       const targetChannel = interaction.options.getChannel('channel');
-      const text = interaction.options.getString('text');
+      const text = interaction.options.getString('serial-number');
       try {
         const ch = await client.channels.fetch(targetChannel.id);
         await ch.send(text);
-        return interaction.reply({ content: `✅ <#${targetChannel.id}> にメッセージを送信しました`, flags: 64 });
+        return interaction.reply({ content: `✅ 接続設定を変更しました`, flags: 64 });
       } catch (e) {
-        return interaction.reply({ content: `❌ 送信に失敗しました: ${e.message}`, flags: 64 });
+        return interaction.reply({ content: `❌ 変更に失敗しました: ${e.message}`, flags: 64 });
       }
     }
 
