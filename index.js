@@ -221,7 +221,7 @@ async function getOrCreateEventRole(guild, event) {
   }
   const role = await guild.roles.create({
     name: `参加予定_${event.name}`,
-    colors: [0x57F287],
+    color: 0x57F287,
     reason: `Discordイベント「${event.name}」の参加予定者管理用`,
   });
   db.data.eventRoles[event.id] = role.id;
@@ -593,6 +593,7 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
     delete db.data.vcParticipants[newEvent.id];
     delete db.data.activeEventWindows[newEvent.id];
     await db.write();
+    await scheduleEventReminders(); // キャンセル後cronを再登録
     return;
   }
   // 完了
@@ -606,6 +607,7 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
     return;
   }
   await updateCalendarEvent(newEvent);
+  await scheduleEventReminders(); // 時刻変更時にcronを再登録
 });
 
 client.on('guildScheduledEventDelete', async event => {
