@@ -632,6 +632,9 @@ client.on('guildScheduledEventDelete', async event => {
   delete db.data.vcParticipants[event.id];
   delete db.data.activeEventWindows[event.id];
   await db.write();
+  // 削除されたイベントのcronを除外して再登録
+  await scheduleEventReminders();
+  console.log(`🗑️ イベント削除によりcronを再登録: "${event.name}"`);
 });
 
 // ============================================================
