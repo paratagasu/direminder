@@ -551,9 +551,13 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     for (const e of all.values()) {
       if (e.channelId !== newState.channelId) continue;
       // activeEventWindowsで時間範囲チェック
+      // windowがない場合はイベントがACTIVE(2)なら記録する
       const window = db.data.activeEventWindows[e.id];
-      if (!window) continue;
-      if (now < window.start || now > window.end) continue;
+      if (window) {
+        if (now < window.start || now > window.end) continue;
+      } else if (e.status !== 2) {
+        continue; // windowもなくACTIVEでもない場合はスキップ
+      }
       // 除外ユーザーチェック
       if ((db.data.vcExcludeUsers ?? []).includes(userId)) continue;
       if (!db.data.vcParticipants[e.id]) db.data.vcParticipants[e.id] = [];
@@ -585,6 +589,16 @@ client.on('guildScheduledEventCreate', async event => {
 
 client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
   if (newEvent.guildId !== GUILD_ID) return;
+  // ACTIVE（開始）になった時もウィンドウを記録
+  if (newEvent.status === 2 && oldEvent.status !== 2) {
+    db.data.activeEventWindows[newEvent.id] = {
+      start: newEvent.scheduledStartTimestamp,
+      end: newEvent.scheduledEndTimestamp ?? (newEvent.scheduledStartTimestamp + 3 * 60 * 60 * 1000)
+    };
+    await db.write();
+    console.log(`▶ イベント開始ウィンドウ記録: "${newEvent.name}"`);
+  }
+
   // キャンセル
   if (newEvent.status === 4) {
     const guild = await client.guilds.fetch(GUILD_ID);
@@ -692,6 +706,27 @@ client.once('ready', async () => {
   console.log('✅ Slash commands registered');
 
   bootstrapSchedules();
+
+  // 起動時にACTIVEなイベントのウィンドウを復元
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const all = await guild.scheduledEvents.fetch();
+    for (const e of all.values()) {
+      // ACTIVE(2) = 進行中
+      if (e.status === 2) {
+        if (!db.data.activeEventWindows[e.id]) {
+          db.data.activeEventWindows[e.id] = {
+            start: e.scheduledStartTimestamp,
+            end: e.scheduledEndTimestamp ?? (e.scheduledStartTimestamp + 3 * 60 * 60 * 1000)
+          };
+          console.log(`🔄 アクティブイベントウィンドウ復元: "${e.name}"`);
+        }
+      }
+    }
+    await db.write();
+  } catch (e) {
+    console.error('アクティブイベント復元エラー:', e.message);
+  }
 });
 
 // ============================================================
