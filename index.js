@@ -546,10 +546,16 @@ function generateRandomKatakana(length) {
 async function queryMemberCalendars(targetDate, targetHour) {
   if (!calendarEnabled) return null;
 
-  // targetDate: Date object (JST 00:00:00)
-  // targetHour: 検索する時刻 (例: 20 → 20:00)
-  const windowStart = new Date(targetDate);
-  windowStart.setHours(targetHour, 0, 0, 0);
+  // JSTで指定日時を作り、UTCに変換してAPIに渡す
+  // targetDate: { year, month(1-12), day }
+  // targetHour: 検索する時刻 (例: 20 → 20:00 JST)
+  const windowStart = new Date(Date.UTC(
+    targetDate.year,
+    targetDate.month - 1,
+    targetDate.day,
+    targetHour - 9, // JST → UTC (-9時間)
+    0, 0, 0
+  ));
   const windowEnd = new Date(windowStart.getTime() + 60 * 60 * 1000); // 1時間後
 
   const results = [];
@@ -957,7 +963,7 @@ client.on('interactionCreate', async interaction => {
       const time  = interaction.options.getString('time');
       const [h]   = time.split(':').map(Number);
       const now   = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const target = new Date(now.getFullYear(), month - 1, day, h, 0, 0, 0);
+      const target = { year: now.getFullYear(), month, day };
       const results = await queryMemberCalendars(target, h);
       const label = `${month}/${day} ${time}`;
       return interaction.editReply(formatCalendarResults(results, label));
@@ -971,10 +977,9 @@ client.on('interactionCreate', async interaction => {
       const now  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
       let msg = '';
       for (let i = 0; i < 7; i++) {
-        const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, h, 0, 0, 0);
-        const m = target.getMonth() + 1;
-        const d = target.getDate();
-        const label = `**${m}/${d}**`;
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+        const target = { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+        const label = `**${target.month}/${target.day}**`;
         const results = await queryMemberCalendars(target, h);
         msg += formatCalendarResults(results, label) + '\n\n';
       }
