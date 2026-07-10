@@ -6,9 +6,15 @@ import cron from 'node-cron';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import { google } from 'googleapis';
-import { Client, IntentsBitField, REST, Routes, SlashCommandBuilder, AttachmentBuilder } from 'discord.js';
+import {
+  Client, IntentsBitField, REST, Routes,
+  SlashCommandBuilder, AttachmentBuilder
+} from 'discord.js';
+import {
+  joinVoiceChannel, VoiceConnectionStatus, entersState,
+  getVoiceConnection
+} from '@discordjs/voice';
 import * as dotenv from 'dotenv';
-import fs from 'fs';
 dotenv.config();
 
 // ============================================================
@@ -25,6 +31,20 @@ if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ .env に DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID を設定してください');
   process.exit(1);
 }
+
+// ============================================================
+// メンバーカレンダーID
+// ============================================================
+const MEMBER_CALENDARS = {
+  'しいたけ': 'c7f96baa0ad2a16ff28b4f2a9f2aef456fe6fab3b3ba7f0f873982c07924034a@group.calendar.google.com',
+  'たか':     '26e8b54b64c26d4768d7248d47abc37729fda9c096755af5b75add915f4d0f3e@group.calendar.google.com',
+  'りんけ':   '89d88175048457539a85c48a2deac8d154d83216738894dc0e028f76ee132b95@group.calendar.google.com',
+  'アズ':     'c6ae62fcb9a3abe8ab69551a848b965e56815a85e4c1eaf653c74cee80a4e738@group.calendar.google.com',
+  'デクノ':   'd8241c1d6c4ea36504a81b8bb5a818ec81ad570dc1a9b37b04a503c1c89e05fe@group.calendar.google.com',
+  'フェルム': '2a8cb83586c5195204ada257461207033be93af563ad99ad6b77d72bf03cbf04@group.calendar.google.com',
+  'マドリガル':'3be73a6f8c0c045bed4e1c98633d78aa855763783164c0e509b2aaac948806fa@group.calendar.google.com',
+  'リヨナロ': '56f593f99e9ad9d62d2716775400942a38aefb495b6528576a6f7c6274a4671f@group.calendar.google.com',
+};
 
 // ============================================================
 // Google Calendar 初期化
@@ -84,9 +104,8 @@ const defaultData = {
   eventRoles: {},
   reminderMsgMap: {},
   lastReminderMsgIds: [],
-  vcParticipants: {},
-  vcExcludeUsers: [],       // 参加者記録から除外するユーザーIDリスト
-  activeEventWindows: {},   // Discord Event ID → { start, end } 記録有効期間
+  vcExcludeUsers: [],
+  activeVcSessions: {}, // Discord Event ID → { participants: [], channelId }
 };
 
 const adapter = new JSONFile('settings.json');
@@ -97,9 +116,8 @@ db.data.eventMap           ??= {};
 db.data.eventRoles         ??= {};
 db.data.reminderMsgMap     ??= {};
 db.data.lastReminderMsgIds ??= [];
-db.data.vcParticipants     ??= {};
 db.data.vcExcludeUsers     ??= [];
-db.data.activeEventWindows ??= {};
+db.data.activeVcSessions   ??= {};
 if (!Array.isArray(db.data.reminderOffsets)) db.data.reminderOffsets = [60, 15];
 await db.write();
 
@@ -124,31 +142,32 @@ function toCalendarEvent(event) {
   };
 }
 
-async function createCalendarEvent(discordEvent) {
+async function syncAllEventsToCalendar() {
   if (!calendarEnabled) return;
-  // 既にeventMapにあれば重複作成しない
-  if (db.data.eventMap[discordEvent.id]) {
-    await updateCalendarEvent(discordEvent);
-    return;
-  }
   try {
-    const res = await calendar.events.insert({ calendarId: GOOGLE_CALENDAR_ID, resource: toCalendarEvent(discordEvent) });
-    db.data.eventMap[discordEvent.id] = res.data.id;
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const all = await guild.scheduledEvents.fetch();
+    for (const e of all.values()) {
+      if (db.data.eventMap[e.id]) {
+        // 既存イベントは更新
+        await calendar.events.patch({
+          calendarId: GOOGLE_CALENDAR_ID,
+          eventId: db.data.eventMap[e.id],
+          resource: toCalendarEvent(e),
+        }).catch(() => {});
+      } else {
+        // 新規イベントは作成
+        const res = await calendar.events.insert({
+          calendarId: GOOGLE_CALENDAR_ID,
+          resource: toCalendarEvent(e),
+        });
+        db.data.eventMap[e.id] = res.data.id;
+      }
+    }
     await db.write();
-    console.log(`📅 Google Calendar に追加: "${discordEvent.name}"`);
-  } catch (e) { console.error(`❌ Google Calendar 作成失敗:`, e.message); }
-}
-
-async function updateCalendarEvent(discordEvent) {
-  if (!calendarEnabled) return;
-  const gcalId = db.data.eventMap[discordEvent.id];
-  if (!gcalId) { await createCalendarEvent(discordEvent); return; }
-  try {
-    await calendar.events.patch({ calendarId: GOOGLE_CALENDAR_ID, eventId: gcalId, resource: toCalendarEvent(discordEvent) });
-    console.log(`🔄 Google Calendar を更新: "${discordEvent.name}"`);
+    console.log('🔄 Googleカレンダー同期完了');
   } catch (e) {
-    if (e.code === 404) { delete db.data.eventMap[discordEvent.id]; await db.write(); await createCalendarEvent(discordEvent); }
-    else console.error(`❌ Google Calendar 更新失敗:`, e.message);
+    console.error('❌ Googleカレンダー同期失敗:', e.message);
   }
 }
 
@@ -167,17 +186,15 @@ async function deleteCalendarEvent(discordEventId, name = '不明') {
   }
 }
 
-// ============================================================
-// イベント終了時に参加者をGoogleカレンダーに書き込む
-// ============================================================
-async function writeParticipantsToCalendar(discordEvent) {
+async function writeParticipantsToCalendar(eventId, eventName) {
   if (!calendarEnabled) return;
-  const gcalId = db.data.eventMap[discordEvent.id];
+  const gcalId = db.data.eventMap[eventId];
   if (!gcalId) return;
+  const session = db.data.activeVcSessions[eventId];
+  if (!session) return;
 
-  const participantIds = db.data.vcParticipants[discordEvent.id] ?? [];
   const excludeIds = db.data.vcExcludeUsers ?? [];
-  const filteredIds = participantIds.filter(id => !excludeIds.includes(id));
+  const filteredIds = (session.participants ?? []).filter(id => !excludeIds.includes(id));
 
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
@@ -186,19 +203,69 @@ async function writeParticipantsToCalendar(discordEvent) {
       const member = await guild.members.fetch(userId).catch(() => null);
       if (member) names.push(member.displayName);
     }
-
     const existing = await calendar.events.get({ calendarId: GOOGLE_CALENDAR_ID, eventId: gcalId });
     const oldDesc = existing.data.description || '';
-    const newDesc = oldDesc + `\n\n🎙️ 参加者 (${names.length}名):\n` + (names.length > 0 ? names.map(n => `・${n}`).join('\n') : '（なし）');
-
+    const newDesc = oldDesc + `\n\n🎙️ 参加者 (${names.length}名):\n` +
+      (names.length > 0 ? names.map(n => `・${n}`).join('\n') : '（なし）');
     await calendar.events.patch({
       calendarId: GOOGLE_CALENDAR_ID,
       eventId: gcalId,
       resource: { description: newDesc },
     });
-    console.log(`📝 参加者をCalendarに書き込み: "${discordEvent.name}" (${names.length}名)`);
+    console.log(`📝 参加者をCalendarに書き込み: "${eventName}" (${names.length}名)`);
   } catch (e) {
     console.error(`❌ 参加者書き込み失敗:`, e.message);
+  }
+}
+
+// ============================================================
+// VCセッション管理（BotのVC入退室 + 参加者収集）
+// ============================================================
+async function startVcSession(event) {
+  if (!event.channelId) return;
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(event.channelId);
+    if (!channel || !channel.isVoiceBased()) return;
+
+    // BotがVCに参加
+    const connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: GUILD_ID,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: true,
+      selfMute: true,
+    });
+
+    // 既存メンバーを初期参加者として登録
+    await channel.fetch();
+    const initialMembers = [...channel.members.keys()].filter(id => id !== client.user.id);
+
+    db.data.activeVcSessions[event.id] = {
+      channelId: event.channelId,
+      participants: initialMembers,
+    };
+    await db.write();
+    console.log(`🎙️ VCセッション開始: "${event.name}" (初期参加者: ${initialMembers.length}名)`);
+  } catch (e) {
+    console.error(`❌ VCセッション開始失敗:`, e.message);
+  }
+}
+
+async function endVcSession(eventId, eventName) {
+  try {
+    // VCから退室
+    const connection = getVoiceConnection(GUILD_ID);
+    if (connection) connection.destroy();
+
+    // Googleカレンダーに参加者を書き込み
+    await writeParticipantsToCalendar(eventId, eventName);
+
+    delete db.data.activeVcSessions[eventId];
+    await db.write();
+    console.log(`🎙️ VCセッション終了: "${eventName}"`);
+  } catch (e) {
+    console.error(`❌ VCセッション終了失敗:`, e.message);
   }
 }
 
@@ -211,7 +278,6 @@ async function getOrCreateEventRole(guild, event) {
     const role = guild.roles.cache.get(existingRoleId) || await guild.roles.fetch(existingRoleId).catch(() => null);
     if (role) return role;
   }
-  // 同名ロールが既に存在する場合は再利用
   await guild.roles.fetch();
   const existing = guild.roles.cache.find(r => r.name === `参加予定_${event.name}`);
   if (existing) {
@@ -263,11 +329,9 @@ async function stripAllEventRoles(guild) {
 // ============================================================
 // cron ジョブ管理（重複防止）
 // ============================================================
-// 登録済みcronのキー管理（同じdescが既にあれば上書き）
-const jobMap = new Map(); // desc → job
+const jobMap = new Map();
 
 function registerCron(expr, jobFn, desc) {
-  // 既に同じdescのjobがあれば停止してから登録
   if (jobMap.has(desc)) {
     jobMap.get(desc).stop();
     jobMap.delete(desc);
@@ -397,32 +461,8 @@ async function scheduleEventReminders() {
     }
   }
 
-  // イベント開始時アナウンス
+  // 開始3分後の未参加チェック
   for (const e of events.values()) {
-    const start    = new Date(e.scheduledStartTimestamp);
-    const jst      = new Date(start.getTime() + 9 * 60 * 60 * 1000);
-    const expr     = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
-    const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
-    const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-
-    registerCron(expr, async () => {
-      const g  = await client.guilds.fetch(GUILD_ID);
-      const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
-      // 開始時刻をactiveEventWindowsに記録
-      db.data.activeEventWindows[e.id] = {
-        start: e.scheduledStartTimestamp,
-        end: e.scheduledEndTimestamp ?? (e.scheduledStartTimestamp + 3 * 60 * 60 * 1000)
-      };
-      await db.write();
-      await ch.send({
-        content: `@everyone\n🚀 **「${e.name}」が始まりました！**\n` +
-                 `📍 会場チャンネル: <${chanUrl}>\n` +
-                 `🔗 イベントリンク: <${eventUrl}>`,
-        allowedMentions: { parse: ['everyone'] }
-      });
-    }, `start '${e.name}'`);
-
-    // 開始3分後の未参加チェック
     const check = new Date(e.scheduledStartTimestamp + 3 * 60000);
     const jstC  = new Date(check.getTime() + 9 * 60 * 60 * 1000);
     const exprC = `${jstC.getUTCMinutes()} ${jstC.getUTCHours()} ${jstC.getUTCDate()} ${jstC.getUTCMonth() + 1} *`;
@@ -455,41 +495,95 @@ function bootstrapSchedules() {
   clearAllJobs();
   scheduleDailyReminders();
   scheduleEventReminders();
+
+  // Googleカレンダーを3分おきにポーリング同期
+  registerCron('*/3 * * * *', syncAllEventsToCalendar, 'calendar-sync');
 }
 
 // ============================================================
 // ランダムカタカナ生成
 // ============================================================
 function generateRandomKatakana(length) {
-  // 複合カタカナ（2文字で1音）を先に定義
-  const compound = [
-    'ァ','ィ','ゥ','ェ','ォ',
-    'キャ','キィ','キュ','キェ','キョ',
-    'シャ','シィ','シュ','シェ','ショ',
-    'チャ','チィ','チュ','チェ','チョ',
-    'ニャ','ニィ','ニュ','ニェ','ニョ',
-    'ヒャ','ヒィ','ヒュ','ヒェ','ヒョ',
-    'ミャ','ミィ','ミュ','ミェ','ミョ',
-    'リャ','リィ','リュ','リェ','リョ',
-    'ギャ','ギィ','ギュ','ギェ','ギョ',
-    'ジャ','ジィ','ジュ','ジェ','ジョ',
-    'ヂャ','ヂィ','ヂュ','ヂェ','ヂョ',
-    'ビャ','ビィ','ビュ','ビェ','ビョ',
-    'ピャ','ピィ','ピュ','ピェ','ピョ',
+  // 単音と複合音を同じ重みで扱う
+  const chars = [
+    'ア','イ','ウ','エ','オ',
+    'カ','キ','ク','ケ','コ',
+    'サ','シ','ス','セ','ソ',
+    'タ','チ','ツ','テ','ト',
+    'ナ','ニ','ヌ','ネ','ノ',
+    'ハ','ヒ','フ','ヘ','ホ',
+    'マ','ミ','ム','メ','モ',
+    'ヤ','ユ','ヨ',
+    'ラ','リ','ル','レ','ロ',
+    'ワ','ヲ','ン','ッ','ー',
+    'ガ','ギ','グ','ゲ','ゴ',
+    'ザ','ジ','ズ','ゼ','ゾ',
+    'ダ','ヂ','ヅ','デ','ド',
+    'バ','ビ','ブ','ベ','ボ',
+    'パ','ピ','プ','ペ','ポ',
+    'キャ','キュ','キョ',
+    'シャ','シュ','ショ','シェ',
+    'チャ','チュ','チョ','チェ',
+    'ニャ','ニュ','ニョ',
+    'ヒャ','ヒュ','ヒョ',
+    'ミャ','ミュ','ミョ',
+    'リャ','リュ','リョ',
+    'ギャ','ギュ','ギョ',
+    'ジャ','ジュ','ジョ','ジェ',
+    'ビャ','ビュ','ビョ',
+    'ピャ','ピュ','ピョ',
     'ファ','フィ','フェ','フォ',
     'ヴァ','ヴィ','ヴ','ヴェ','ヴォ',
-    'ツァ','ツィ','ツェ','ツォ',
     'ウィ','ウェ','ウォ',
-    'ヲ','ッ','ー',
+    'ツァ','ツィ','ツェ','ツォ',
   ];
-  const single = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン';
-  const all = [...compound, ...single.split('')];
+  return Array.from({ length }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
 
-  const result = [];
-  for (let i = 0; i < length; i++) {
-    result.push(all[Math.floor(Math.random() * all.length)]);
+// ============================================================
+// /tm コマンド: メンバーカレンダー横断検索
+// ============================================================
+async function queryMemberCalendars(targetDate, targetHour) {
+  if (!calendarEnabled) return null;
+
+  // targetDate: Date object (JST 00:00:00)
+  // targetHour: 検索する時刻 (例: 20 → 20:00)
+  const windowStart = new Date(targetDate);
+  windowStart.setHours(targetHour, 0, 0, 0);
+  const windowEnd = new Date(windowStart.getTime() + 60 * 60 * 1000); // 1時間後
+
+  const results = [];
+
+  for (const [name, calId] of Object.entries(MEMBER_CALENDARS)) {
+    try {
+      const res = await calendar.events.list({
+        calendarId: calId,
+        timeMin: windowStart.toISOString(),
+        timeMax: windowEnd.toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime',
+      });
+      for (const event of (res.data.items ?? [])) {
+        const start = event.start.dateTime ?? event.start.date;
+        results.push({ member: name, title: event.summary, start });
+      }
+    } catch (e) {
+      console.error(`❌ ${name}のカレンダー取得失敗:`, e.message);
+    }
   }
-  return result.join('');
+
+  return results;
+}
+
+function formatCalendarResults(results, dateLabel) {
+  if (results.length === 0) return `${dateLabel ? dateLabel + '\n' : ''}この時間の予定はありません`;
+  const lines = results.map(r => {
+    const time = new Date(r.start).toLocaleTimeString('ja-JP', {
+      hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo'
+    });
+    return `・【${r.member}】${r.title}\n　${time}〜`;
+  });
+  return `${dateLabel ? dateLabel + '\n' : ''}この時間の予定は以下${results.length}件です\n${lines.join('\n')}`;
 }
 
 // ============================================================
@@ -537,66 +631,47 @@ client.on('messageReactionAdd',    (reaction, user) => handleReaction(reaction, 
 client.on('messageReactionRemove', (reaction, user) => handleReaction(reaction, user, false));
 
 // ============================================================
-// VCへの参加を記録（イベント開始〜終了時刻の間のみ）
+// VCの入退室を監視して参加者を記録
 // ============================================================
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (newState.guild.id !== GUILD_ID) return;
-  if (!newState.channelId || newState.channelId === oldState.channelId) return;
   const userId = newState.id;
-  const now = Date.now();
+  if (userId === client.user.id) return; // Bot自身は無視
 
-  try {
-    const guild = newState.guild;
-    const all = await guild.scheduledEvents.fetch();
-    for (const e of all.values()) {
-      if (e.channelId !== newState.channelId) continue;
-      // activeEventWindowsで時間範囲チェック
-      // windowがない場合はイベントがACTIVE(2)なら記録する
-      const window = db.data.activeEventWindows[e.id];
-      if (window) {
-        if (now < window.start || now > window.end) continue;
-      } else if (e.status !== 2) {
-        continue; // windowもなくACTIVEでもない場合はスキップ
-      }
-      // 除外ユーザーチェック
+  // VCに入室した場合
+  if (newState.channelId && newState.channelId !== oldState.channelId) {
+    for (const [eventId, session] of Object.entries(db.data.activeVcSessions)) {
+      if (session.channelId !== newState.channelId) continue;
       if ((db.data.vcExcludeUsers ?? []).includes(userId)) continue;
-      if (!db.data.vcParticipants[e.id]) db.data.vcParticipants[e.id] = [];
-      if (!db.data.vcParticipants[e.id].includes(userId)) {
-        db.data.vcParticipants[e.id].push(userId);
+      if (!session.participants.includes(userId)) {
+        session.participants.push(userId);
         await db.write();
-        console.log(`🎙️ VC参加記録: ${userId} → 「${e.name}」`);
+        console.log(`🎙️ VC参加記録: ${userId} → セッション ${eventId}`);
       }
     }
-  } catch (err) {
-    console.error('voiceStateUpdate error:', err.message);
   }
 });
 
 // ============================================================
 // リアルタイムイベント検知
 // ============================================================
-client.on('guildScheduledEventCreate', async event => {
-  if (event.guildId !== GUILD_ID) return;
-  console.log(`🆕 New scheduled event: "${event.name}"`);
-  await createCalendarEvent(event);
-  // 本日のイベントならcronを追加登録
-  const todayJST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-  const todayStr = `${todayJST.getFullYear()}-${String(todayJST.getMonth()+1).padStart(2,'0')}-${String(todayJST.getDate()).padStart(2,'0')}`;
-  const d = new Date(new Date(event.scheduledStartTimestamp).toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-  const s = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  if (s === todayStr) await scheduleEventReminders();
-});
-
 client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
   if (newEvent.guildId !== GUILD_ID) return;
-  // ACTIVE（開始）になった時もウィンドウを記録
+
+  // ACTIVE（開始）になった
   if (newEvent.status === 2 && oldEvent.status !== 2) {
-    db.data.activeEventWindows[newEvent.id] = {
-      start: newEvent.scheduledStartTimestamp,
-      end: newEvent.scheduledEndTimestamp ?? (newEvent.scheduledStartTimestamp + 3 * 60 * 60 * 1000)
-    };
-    await db.write();
-    console.log(`▶ イベント開始ウィンドウ記録: "${newEvent.name}"`);
+    console.log(`▶ イベント開始: "${newEvent.name}"`);
+    await startVcSession(newEvent);
+    return;
+  }
+
+  // 完了
+  if (newEvent.status === 3 && oldEvent.status !== 3) {
+    console.log(`⏹ イベント完了: "${newEvent.name}"`);
+    await endVcSession(newEvent.id, newEvent.name);
+    const guild = await client.guilds.fetch(GUILD_ID);
+    await deleteEventRole(guild, newEvent.id, newEvent.name);
+    return;
   }
 
   // キャンセル
@@ -604,24 +679,11 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
     const guild = await client.guilds.fetch(GUILD_ID);
     await deleteEventRole(guild, newEvent.id, newEvent.name);
     await deleteCalendarEvent(newEvent.id, newEvent.name);
-    delete db.data.vcParticipants[newEvent.id];
-    delete db.data.activeEventWindows[newEvent.id];
+    delete db.data.activeVcSessions[newEvent.id];
     await db.write();
-    await scheduleEventReminders(); // キャンセル後cronを再登録
+    await scheduleEventReminders();
     return;
   }
-  // 完了
-  if (newEvent.status === 3 && oldEvent.status !== 3) {
-    await writeParticipantsToCalendar(newEvent);
-    const guild = await client.guilds.fetch(GUILD_ID);
-    await deleteEventRole(guild, newEvent.id, newEvent.name);
-    delete db.data.vcParticipants[newEvent.id];
-    delete db.data.activeEventWindows[newEvent.id];
-    await db.write();
-    return;
-  }
-  await updateCalendarEvent(newEvent);
-  await scheduleEventReminders(); // 時刻変更時にcronを再登録
 });
 
 client.on('guildScheduledEventDelete', async event => {
@@ -629,10 +691,8 @@ client.on('guildScheduledEventDelete', async event => {
   const guild = await client.guilds.fetch(GUILD_ID);
   await deleteEventRole(guild, event.id, event.name);
   await deleteCalendarEvent(event.id, event.name);
-  delete db.data.vcParticipants[event.id];
-  delete db.data.activeEventWindows[event.id];
+  delete db.data.activeVcSessions[event.id];
   await db.write();
-  // 削除されたイベントのcronを除外して再登録
   await scheduleEventReminders();
   console.log(`🗑️ イベント削除によりcronを再登録: "${event.name}"`);
 });
@@ -702,6 +762,16 @@ client.once('ready', async () => {
       .setName('exclude-user-import')
       .setDescription('除外ユーザーリストをJSONファイルからインポート')
       .addAttachmentOption(opt => opt.setName('file').setDescription('インポートするJSONファイル').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('tm')
+      .setDescription('指定日時のメンバーカレンダーを確認する')
+      .addIntegerOption(opt => opt.setName('month').setDescription('月').setRequired(true).setMinValue(1).setMaxValue(12))
+      .addIntegerOption(opt => opt.setName('day').setDescription('日').setRequired(true).setMinValue(1).setMaxValue(31))
+      .addStringOption(opt => opt.setName('time').setDescription('時刻（例: 20:00）').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('tm-week')
+      .setDescription('本日から1週間の指定時刻のメンバーカレンダーを確認する')
+      .addStringOption(opt => opt.setName('time').setDescription('時刻（例: 20:00）').setRequired(true)),
   ].map(cmd => cmd.toJSON());
 
   await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
@@ -709,27 +779,6 @@ client.once('ready', async () => {
   console.log('✅ Slash commands registered');
 
   bootstrapSchedules();
-
-  // 起動時にACTIVEなイベントのウィンドウを復元
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const all = await guild.scheduledEvents.fetch();
-    for (const e of all.values()) {
-      // ACTIVE(2) = 進行中
-      if (e.status === 2) {
-        if (!db.data.activeEventWindows[e.id]) {
-          db.data.activeEventWindows[e.id] = {
-            start: e.scheduledStartTimestamp,
-            end: e.scheduledEndTimestamp ?? (e.scheduledStartTimestamp + 3 * 60 * 60 * 1000)
-          };
-          console.log(`🔄 アクティブイベントウィンドウ復元: "${e.name}"`);
-        }
-      }
-    }
-    await db.write();
-  } catch (e) {
-    console.error('アクティブイベント復元エラー:', e.message);
-  }
 });
 
 // ============================================================
@@ -759,9 +808,8 @@ client.on('interactionCreate', async interaction => {
         await db.write();
         bootstrapSchedules();
         return interaction.reply(`✅ **${min}分前** リマインドを追加しました（現在: ${db.data.reminderOffsets.join(', ')}分前）`);
-      } else {
-        return interaction.reply(`ℹ️ **${min}分前** はすでに設定されています`);
       }
+      return interaction.reply(`ℹ️ **${min}分前** はすでに設定されています`);
     }
 
     case 'remove-reminder-offset': {
@@ -773,9 +821,8 @@ client.on('interactionCreate', async interaction => {
         await db.write();
         bootstrapSchedules();
         return interaction.reply(`✅ **${min}分前** リマインドを削除しました（現在: ${db.data.reminderOffsets.join(', ')}分前）`);
-      } else {
-        return interaction.reply(`ℹ️ **${min}分前** は設定されていません`);
       }
+      return interaction.reply(`ℹ️ **${min}分前** は設定されていません`);
     }
 
     case 'list-reminder-offsets': {
@@ -805,15 +852,8 @@ client.on('interactionCreate', async interaction => {
     case 'sync-calendar': {
       if (!calendarEnabled) return interaction.reply('⚠️ Google Calendar 連携が設定されていません');
       await interaction.deferReply({ flags: 64 });
-      const guild  = await client.guilds.fetch(GUILD_ID);
-      const events = await fetchWeekEvents(guild);
-      if (events.size === 0) return interaction.editReply('📭 同期するイベントがありません');
-      let created = 0, updated = 0;
-      for (const e of events.values()) {
-        if (db.data.eventMap[e.id]) { await updateCalendarEvent(e); updated++; }
-        else { await createCalendarEvent(e); created++; }
-      }
-      return interaction.editReply(`✅ Google Calendar 同期完了\n新規登録: ${created}件 / 更新: ${updated}件`);
+      await syncAllEventsToCalendar();
+      return interaction.editReply('✅ Google Calendar 同期完了');
     }
 
     case 'force-remind': {
@@ -837,7 +877,7 @@ client.on('interactionCreate', async interaction => {
       try {
         const ch = await client.channels.fetch(targetChannel.id);
         await ch.send(text);
-        return interaction.reply({ content: `✅ 接続設定を変更しました`, flags: 64 });
+        return interaction.reply({ content: '✅ 接続設定を変更しました', flags: 64 });
       } catch (e) {
         return interaction.reply({ content: `❌ 変更に失敗しました: ${e.message}`, flags: 64 });
       }
@@ -856,9 +896,8 @@ client.on('interactionCreate', async interaction => {
         db.data.vcExcludeUsers.push(user.id);
         await db.write();
         return interaction.reply(`✅ ${user.username} を参加者記録の除外リストに追加しました`);
-      } else {
-        return interaction.reply(`ℹ️ ${user.username} はすでに除外リストに登録されています`);
       }
+      return interaction.reply(`ℹ️ ${user.username} はすでに除外リストに登録されています`);
     }
 
     case 'exclude-user-remove': {
@@ -869,9 +908,8 @@ client.on('interactionCreate', async interaction => {
         db.data.vcExcludeUsers.splice(idx, 1);
         await db.write();
         return interaction.reply(`✅ ${user.username} を除外リストから削除しました`);
-      } else {
-        return interaction.reply(`ℹ️ ${user.username} は除外リストに登録されていません`);
       }
+      return interaction.reply(`ℹ️ ${user.username} は除外リストに登録されていません`);
     }
 
     case 'exclude-user-list': {
@@ -881,7 +919,8 @@ client.on('interactionCreate', async interaction => {
       const names = [];
       for (const id of ids) {
         const member = await guild.members.fetch(id).catch(() => null);
-        names.push(member ? `・${member.displayName} (<@${id}>)` : `・不明 (${id})`);
+        // メンションせずにユーザー名のみ表示
+        names.push(member ? `・${member.displayName} (${id})` : `・不明 (${id})`);
       }
       return interaction.reply(`📋 参加者記録の除外ユーザー一覧 (${ids.length}名):\n${names.join('\n')}`);
     }
@@ -900,7 +939,7 @@ client.on('interactionCreate', async interaction => {
         const res = await fetch(attachment.url);
         const json = await res.json();
         if (!Array.isArray(json.vcExcludeUsers)) {
-          return interaction.reply({ content: '❌ JSONの形式が正しくありません。`{ "vcExcludeUsers": ["id1", "id2"] }` の形式で指定してください', flags: 64 });
+          return interaction.reply({ content: '❌ JSONの形式が正しくありません', flags: 64 });
         }
         db.data.vcExcludeUsers = json.vcExcludeUsers;
         await db.write();
@@ -908,6 +947,38 @@ client.on('interactionCreate', async interaction => {
       } catch (e) {
         return interaction.reply({ content: `❌ インポートに失敗しました: ${e.message}`, flags: 64 });
       }
+    }
+
+    case 'tm': {
+      if (!calendarEnabled) return interaction.reply('⚠️ Google Calendar 連携が設定されていません');
+      await interaction.deferReply();
+      const month = interaction.options.getInteger('month');
+      const day   = interaction.options.getInteger('day');
+      const time  = interaction.options.getString('time');
+      const [h]   = time.split(':').map(Number);
+      const now   = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+      const target = new Date(now.getFullYear(), month - 1, day, h, 0, 0, 0);
+      const results = await queryMemberCalendars(target, h);
+      const label = `${month}/${day} ${time}`;
+      return interaction.editReply(formatCalendarResults(results, label));
+    }
+
+    case 'tm-week': {
+      if (!calendarEnabled) return interaction.reply('⚠️ Google Calendar 連携が設定されていません');
+      await interaction.deferReply();
+      const time = interaction.options.getString('time');
+      const [h]  = time.split(':').map(Number);
+      const now  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+      let msg = '';
+      for (let i = 0; i < 7; i++) {
+        const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, h, 0, 0, 0);
+        const m = target.getMonth() + 1;
+        const d = target.getDate();
+        const label = `**${m}/${d}**`;
+        const results = await queryMemberCalendars(target, h);
+        msg += formatCalendarResults(results, label) + '\n\n';
+      }
+      return interaction.editReply(msg.trim());
     }
   }
 });
