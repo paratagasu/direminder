@@ -139,7 +139,29 @@ function toCalendarEvent(event) {
     start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Tokyo' },
     end:   { dateTime: endTime.toISOString(),   timeZone: 'Asia/Tokyo' },
     ...(event.entityMetadata?.location && { location: event.entityMetadata.location }),
+    // Discord Event IDをカスタムプロパティとして埋め込む（重複防止用）
+    extendedProperties: {
+      private: { discordEventId: event.id }
+    },
   };
+}
+
+/** Google CalendarからDiscord Event IDでイベントを検索する */
+async function findCalendarEventByDiscordId(discordEventId) {
+  if (!calendarEnabled) return null;
+  try {
+    const res = await calendar.events.list({
+      calendarId: GOOGLE_CALENDAR_ID,
+      privateExtendedProperty: `discordEventId=${discordEventId}`,
+      singleEvents: true,
+      maxResults: 1,
+    });
+    const items = res.data.items ?? [];
+    return items.length > 0 ? items[0] : null;
+  } catch (e) {
+    console.error('❌ カレンダーイベント検索失敗:', e.message);
+    return null;
+  }
 }
 
 async function syncAllEventsToCalendar() {
@@ -173,7 +195,12 @@ async function syncAllEventsToCalendar() {
 
 async function deleteCalendarEvent(discordEventId, name = '不明') {
   if (!calendarEnabled) return;
-  const gcalId = db.data.eventMap[discordEventId];
+  let gcalId = db.data.eventMap[discordEventId];
+  // DBにない場合はCalendarを検索
+  if (!gcalId) {
+    const existing = await findCalendarEventByDiscordId(discordEventId);
+    if (existing) gcalId = existing.id;
+  }
   if (!gcalId) return;
   try {
     await calendar.events.delete({ calendarId: GOOGLE_CALENDAR_ID, eventId: gcalId });
@@ -188,8 +215,20 @@ async function deleteCalendarEvent(discordEventId, name = '不明') {
 
 async function writeParticipantsToCalendar(eventId, eventName) {
   if (!calendarEnabled) return;
-  const gcalId = db.data.eventMap[eventId];
-  if (!gcalId) return;
+  let gcalId = db.data.eventMap[eventId];
+  // DBにない場合はCalendarを検索
+  if (!gcalId) {
+    const existing = await findCalendarEventByDiscordId(eventId);
+    if (existing) {
+      gcalId = existing.id;
+      db.data.eventMap[eventId] = gcalId;
+      await db.write();
+    }
+  }
+  if (!gcalId) {
+    console.log(`⚠️ "${eventName}" のCalendarイベントが見つかりません`);
+    return;
+  }
   const session = db.data.activeVcSessions[eventId];
   if (!session) return;
 
@@ -979,7 +1018,9 @@ client.on('interactionCreate', async interaction => {
       for (let i = 0; i < 7; i++) {
         const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
         const target = { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
-        const label = `**${target.month}/${target.day}**`;
+        const dateObj = new Date(Date.UTC(target.year, target.month - 1, target.day, 0, 0, 0));
+        const weekday = dateObj.toLocaleDateString('ja-JP', { weekday: 'short', timeZone: 'Asia/Tokyo' });
+        const label = `**${target.month}/${target.day}(${weekday})**`;
         const results = await queryMemberCalendars(target, h);
         msg += formatCalendarResults(results, label) + '\n\n';
       }
