@@ -588,36 +588,51 @@ function bootstrapSchedules() {
 // ============================================================
 // Klipy GIF ヘルパー
 // ============================================================
-async function klipyFetch(path) {
-  const url = `https://api.klipy.com${path}${path.includes('?') ? '&' : '?'}key=${KLIPY_API_KEY}`;
+async function klipyFetch(endpoint) {
+  const url = `https://api.klipy.com/api/v1/k/${KLIPY_API_KEY}${endpoint}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Klipy API error: ${res.status} ${url}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Klipy API error: ${res.status} (${body.slice(0, 100)})`);
+  }
   return res.json();
 }
 
 function extractGifUrl(item) {
-  // Tenor互換レスポンスからURL取得
   if (!item) return null;
-  const media = Array.isArray(item.media) ? item.media[0] : item.media;
-  return media?.gif?.url ?? media?.tinygif?.url ?? media?.mediumgif?.url ?? item.url ?? null;
+  // data.media がオブジェクト形式の場合
+  if (item.media && !Array.isArray(item.media)) {
+    return item.media.gif?.url ?? item.media.tinygif?.url ?? item.media.mediumgif?.url ?? null;
+  }
+  // data.media が配列形式（Tenor互換）の場合
+  if (Array.isArray(item.media) && item.media[0]) {
+    const m = item.media[0];
+    return m.gif?.url ?? m.tinygif?.url ?? m.mediumgif?.url ?? null;
+  }
+  return item.url ?? null;
 }
 
 async function getRandomGif() {
-  const data = await klipyFetch('/v2/gifs/trending?limit=50&contentfilter=low');
-  const items = data.results ?? data.data ?? [];
+  const data = await klipyFetch('/gifs/trending?limit=50');
+  const items = data.data ?? data.results ?? [];
   if (items.length === 0) throw new Error('GIFが取得できませんでした');
   const item = items[Math.floor(Math.random() * items.length)];
   return extractGifUrl(item);
 }
 
 async function getKlipyCategories() {
-  const data = await klipyFetch('/v2/categories?type=featured');
-  return data.tags ?? data.data ?? [];
+  try {
+    const data = await klipyFetch('/gifs/categories');
+    return data.data ?? data.tags ?? [];
+  } catch (e) {
+    console.error('カテゴリ取得失敗:', e.message);
+    return [];
+  }
 }
 
 async function getRandomGifByCategory(categoryName) {
-  const data = await klipyFetch(`/v2/search?q=${encodeURIComponent(categoryName)}&limit=50&contentfilter=low`);
-  const items = data.results ?? data.data ?? [];
+  const data = await klipyFetch(`/gifs/search?q=${encodeURIComponent(categoryName)}&limit=50`);
+  const items = data.data ?? data.results ?? [];
   if (items.length === 0) throw new Error('GIFが取得できませんでした');
   const item = items[Math.floor(Math.random() * items.length)];
   return extractGifUrl(item);
