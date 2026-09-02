@@ -625,7 +625,10 @@ async function getRandomGif() {
 async function getKlipyCategories() {
   try {
     const data = await klipyFetch('/gifs/categories');
-    return data.data ?? data.tags ?? [];
+    console.log('🎬 Klipyカテゴリレスポンス keys:', Object.keys(data ?? {}).join(', '));
+    // レスポンス形式を柔軟に処理
+    const result = data?.data ?? data?.tags ?? data?.results ?? data?.categories ?? [];
+    return Array.isArray(result) ? result : [];
   } catch (e) {
     console.error('カテゴリ取得失敗:', e.message);
     return [];
@@ -814,15 +817,17 @@ client.once('ready', async () => {
   if (KLIPY_API_KEY) {
     try {
       gifCategories = await getKlipyCategories();
-      console.log(`🎬 Klipyカテゴリ取得: ${gifCategories.length}件`);
     } catch (e) {
       console.error('⚠️ Klipyカテゴリ取得失敗:', e.message);
     }
   }
 
-  const gifCategoryChoices = gifCategories
+  const safeCats = Array.isArray(gifCategories) ? gifCategories : [];
+  console.log(`🎬 Klipyカテゴリ取得: ${safeCats.length}件`);
+  const gifCategoryChoices = safeCats
     .slice(0, 25)
-    .map(c => ({ name: c.name ?? c.slug ?? c, value: c.slug ?? c.name ?? c }));
+    .map(c => ({ name: c.name ?? c.slug ?? String(c), value: c.slug ?? c.name ?? String(c) }))
+    .filter(c => c.name && c.value);
 
   // カテゴリが取れなかった場合はフォールバック
   const fallbackCategories = [
