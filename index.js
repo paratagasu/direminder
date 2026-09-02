@@ -588,32 +588,39 @@ function bootstrapSchedules() {
 // ============================================================
 // Klipy GIF ヘルパー
 // ============================================================
-async function klipyFetch(endpoint) {
-  const res = await fetch(`https://api.klipy.com/api/v1/k/${KLIPY_API_KEY}${endpoint}`);
-  if (!res.ok) throw new Error(`Klipy API error: ${res.status}`);
+async function klipyFetch(path) {
+  const url = `https://api.klipy.com${path}${path.includes('?') ? '&' : '?'}key=${KLIPY_API_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Klipy API error: ${res.status} ${url}`);
   return res.json();
 }
 
+function extractGifUrl(item) {
+  // Tenor互換レスポンスからURL取得
+  if (!item) return null;
+  const media = Array.isArray(item.media) ? item.media[0] : item.media;
+  return media?.gif?.url ?? media?.tinygif?.url ?? media?.mediumgif?.url ?? item.url ?? null;
+}
+
 async function getRandomGif() {
-  // トレンドから取得してランダムに1つ選ぶ
-  const data = await klipyFetch('/gifs/trending?limit=50');
-  const items = data.data ?? [];
+  const data = await klipyFetch('/v2/gifs/trending?limit=50&contentfilter=low');
+  const items = data.results ?? data.data ?? [];
   if (items.length === 0) throw new Error('GIFが取得できませんでした');
   const item = items[Math.floor(Math.random() * items.length)];
-  return item.media?.gif?.url ?? item.media?.tinygif?.url ?? null;
+  return extractGifUrl(item);
 }
 
 async function getKlipyCategories() {
-  const data = await klipyFetch('/gifs/categories');
-  return data.data ?? [];
+  const data = await klipyFetch('/v2/categories?type=featured');
+  return data.tags ?? data.data ?? [];
 }
 
 async function getRandomGifByCategory(categoryName) {
-  const data = await klipyFetch(`/gifs/search?q=${encodeURIComponent(categoryName)}&limit=50`);
-  const items = data.data ?? [];
+  const data = await klipyFetch(`/v2/search?q=${encodeURIComponent(categoryName)}&limit=50&contentfilter=low`);
+  const items = data.results ?? data.data ?? [];
   if (items.length === 0) throw new Error('GIFが取得できませんでした');
   const item = items[Math.floor(Math.random() * items.length)];
-  return item.media?.gif?.url ?? item.media?.tinygif?.url ?? null;
+  return extractGifUrl(item);
 }
 
 // ============================================================
