@@ -589,11 +589,13 @@ function bootstrapSchedules() {
 // Klipy GIF ヘルパー
 // ============================================================
 async function klipyFetch(endpoint) {
-  const url = `https://api.klipy.com/api/v1/k/${KLIPY_API_KEY}${endpoint}`;
+  // /api/v1/{key}/ 形式と /api/v1/k/{key}/ 形式を両方試す
+  const url = `https://api.klipy.com/api/v1/${KLIPY_API_KEY}${endpoint}`;
+  console.log(`🎬 Klipy request: ${url.replace(KLIPY_API_KEY, '[KEY]')}`);
   const res = await fetch(url);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Klipy API error: ${res.status} (${body.slice(0, 100)})`);
+    throw new Error(`Klipy API error: ${res.status} (${body.slice(0, 200)})`);
   }
   return res.json();
 }
