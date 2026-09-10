@@ -1295,7 +1295,6 @@ client.on('interactionCreate', async interaction => {
       } catch (e) { return interaction.editReply(`❌ 取得失敗: ${e.message}`); }
       break;
     }
-  }
 
     case 'debug-events': {
       await interaction.deferReply({ flags: 64 });
