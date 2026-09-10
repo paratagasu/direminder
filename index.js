@@ -1,4 +1,5 @@
 // index.js
+// Version: 2.25.17
 
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
@@ -1352,7 +1353,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     case 'version': {
-      return interaction.reply('🤖 TKイベントリマインダーBot **v2.23.15**');
+      return interaction.reply('🤖 TKイベントリマインダーBot **v2.25.17**');
     }
 
     case 'state-export': {
@@ -1360,7 +1361,7 @@ client.on('interactionCreate', async interaction => {
       if (!isAdmin) return interaction.reply({ content: '⛔ 管理者専用です', flags: 64 });
       const state = {
         exportedAt: new Date().toISOString(),
-        version: '2.25.15',
+        version: '2.25.17',
         morningTime: db.data.morningTime,
         reminderOffsets: db.data.reminderOffsets,
         eventMap: db.data.eventMap,
