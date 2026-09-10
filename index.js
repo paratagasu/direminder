@@ -25,6 +25,8 @@ const {
   KLIPY_API_KEY,
 } = process.env;
 const PORT = process.env.PORT ?? 3000;
+const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
+const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ 必要な環境変数が不足しています');
@@ -113,6 +115,7 @@ const defaultData = {
   vcExcludeUsers: [],
   activeVcSessions: {},
   pendingDeleteSessions: {}, // userId → { msgId, events[], calendarId }
+  saylaterJobs: {},          // interactionId → { fireAt, message, mentionId, channelId }
 };
 
 const adapter = new JSONFile('settings.json');
@@ -126,6 +129,7 @@ db.data.lastReminderMsgIds   ??= [];
 db.data.vcExcludeUsers       ??= [];
 db.data.activeVcSessions     ??= {};
 db.data.pendingDeleteSessions ??= {};
+db.data.saylaterJobs         ??= {};
 if (!Array.isArray(db.data.reminderOffsets)) db.data.reminderOffsets = [60, 15];
 await db.write();
 
@@ -583,6 +587,39 @@ function bootstrapSchedules() {
     try { await scheduleEventReminders(); }
     catch (e) { console.error('イベント再認識エラー:', e.message); }
   }, 'event-resync');
+  // 伝言予約ジョブを復元
+  restoreSaylaterJobs();
+}
+
+function restoreSaylaterJobs() {
+  const now = Date.now();
+  for (const [id, job] of Object.entries(db.data.saylaterJobs ?? {})) {
+    const fireAt = new Date(job.fireAt);
+    if (fireAt <= now) {
+      // 過去の発火予定は即時送信
+      client.channels.fetch(job.channelId).then(ch => {
+        ch.send(`<@${job.mentionId}>
+${job.message}`).catch(() => {});
+      }).catch(() => {});
+      delete db.data.saylaterJobs[id];
+      db.write().catch(() => {});
+      continue;
+    }
+    const jst  = new Date(fireAt.getTime() + 9 * 60 * 60 * 1000);
+    const expr = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+    const desc = `simple-remind:${id}`;
+    registerCron(expr, async () => {
+      try {
+        const ch = await client.channels.fetch(job.channelId);
+        await ch.send(`<@${job.mentionId}>
+${job.message}`);
+      } catch (e) { console.error('❌ 伝言予約送信失敗:', e.message); }
+      delete db.data.saylaterJobs[id];
+      await db.write();
+      if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
+    }, desc);
+    console.log(`📬 伝言予約復元: ${new Date(job.fireAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })} "${job.message.slice(0, 20)}"`);
+  }
 }
 
 // ============================================================
@@ -902,6 +939,40 @@ client.once('ready', async () => {
     new SlashCommandBuilder()
       .setName('cal-delete').setDescription('Googleカレンダーの予定を削除')
       .addIntegerOption(o => o.setName('weeks').setDescription('何週間先まで表示するか（1〜）').setRequired(true).setMinValue(1).setMaxValue(52)),
+    new SlashCommandBuilder().setName('debug-events').setDescription('Botが把握しているイベント情報を表示する'),
+    new SlashCommandBuilder()
+      .setName('dice').setDescription('サイコロを振る')
+      .addIntegerOption(o => o.setName('faces').setDescription('面の数（2〜99999999999）').setRequired(true).setMinValue(2).setMaxValue(99999999999))
+      .addIntegerOption(o => o.setName('count').setDescription('個数（1〜100）').setRequired(true).setMinValue(1).setMaxValue(100)),
+    new SlashCommandBuilder()
+      .setName('anonymous').setDescription('匿名メッセージを送信する')
+      .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル').setRequired(true))
+      .addStringOption(o => o.setName('message').setDescription('送信するメッセージ').setRequired(true)),
+    new SlashCommandBuilder().setName('version').setDescription('Botのバージョンを表示する'),
+    new SlashCommandBuilder().setName('state-export').setDescription('Botの全状態をJSONでエクスポート（管理者専用）'),
+    new SlashCommandBuilder()
+      .setName('state-import').setDescription('JSONファイルからBotの状態をインポート（管理者専用）')
+      .addAttachmentOption(o => o.setName('file').setDescription('エクスポートしたJSONファイル').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('saylatter-rel').setDescription('伝言予約：〇分後・〇時間後・〇日後に送信する')
+      .addIntegerOption(o => o.setName('value').setDescription('数値').setRequired(true).setMinValue(1))
+      .addStringOption(o => o.setName('unit').setDescription('単位').setRequired(true)
+        .addChoices(
+          { name: '分後', value: 'minutes' },
+          { name: '時間後', value: 'hours' },
+          { name: '日後', value: 'days' },
+        ))
+      .addStringOption(o => o.setName('message').setDescription('リマインド本文').setRequired(true))
+      .addUserOption(o => o.setName('mention').setDescription('メンション相手（デフォルト: 自分）').setRequired(false))
+      .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル（デフォルト: いろいろ）').setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('saylatter-abs').setDescription('伝言予約：日付と時刻を指定して送信する')
+      .addIntegerOption(o => o.setName('month').setDescription('月').setRequired(true).setMinValue(1).setMaxValue(12))
+      .addIntegerOption(o => o.setName('day').setDescription('日').setRequired(true).setMinValue(1).setMaxValue(31))
+      .addStringOption(o => o.setName('time').setDescription('時刻（例: 20:00）').setRequired(true))
+      .addStringOption(o => o.setName('message').setDescription('リマインド本文').setRequired(true))
+      .addUserOption(o => o.setName('mention').setDescription('メンション相手（デフォルト: 自分）').setRequired(false))
+      .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル（デフォルト: いろいろ）').setRequired(false)),
   ].map(c => c.toJSON());
 
   await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
@@ -1224,6 +1295,212 @@ client.on('interactionCreate', async interaction => {
         await db.write();
       } catch (e) { return interaction.editReply(`❌ 取得失敗: ${e.message}`); }
       break;
+    }
+  }
+
+    case 'debug-events': {
+      await interaction.deferReply({ flags: 64 });
+      try {
+        const guild = await client.guilds.fetch(GUILD_ID);
+        const all   = await guild.scheduledEvents.fetch();
+        if (all.size === 0) return interaction.editReply('📭 現在把握しているイベントはありません');
+        let msg = `🔍 **Bot把握イベント一覧** (${all.size}件)\n\n`;
+        for (const e of all.values()) {
+          const startJst = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', {
+            year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo'
+          });
+          const statusMap = { 1: '予定', 2: '開催中', 3: '完了', 4: 'キャンセル' };
+          const status = statusMap[e.status] ?? '不明';
+          const roleId = db.data.eventRoles[e.id];
+          let members = '（なし）';
+          if (roleId) {
+            const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
+            if (role && role.members.size > 0) members = [...role.members.values()].map(m => m.displayName).join(', ');
+          }
+          const reminders = [];
+          for (const [desc] of jobMap.entries()) {
+            if (desc.startsWith(`reminder:${e.id}:`)) {
+              const offsetMin = parseInt(desc.split(':')[2].replace('-',''));
+              const reminderTime = new Date(e.scheduledStartTimestamp - offsetMin * 60000);
+              const reminderJst = reminderTime.toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+              reminders.push(`${offsetMin}分前 (${reminderJst})`);
+            }
+          }
+          msg += `**◆ ${e.name}**\n　状態: ${status}\n　開催: ${startJst}\n　参加予定: ${members}\n　リマインド: ${reminders.length > 0 ? reminders.join(', ') : '（未登録）'}\n\n`;
+        }
+        return interaction.editReply(msg.slice(0, 2000));
+      } catch (e) { return interaction.editReply(`❌ エラー: ${e.message}`); }
+    }
+
+    case 'dice': {
+      const faces = interaction.options.getInteger('faces');
+      const count = interaction.options.getInteger('count');
+      const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * faces) + 1);
+      const total = rolls.reduce((a, b) => a + b, 0);
+      let msg = `🎲 **${interaction.user.displayName}** が **${count}d${faces}** を振りました！\n`;
+      msg += count === 1 ? `結果: **${rolls[0]}**` : `結果: ${rolls.join(', ')}\n合計: **${total}**`;
+      return interaction.reply(msg);
+    }
+
+    case 'anonymous': {
+      const targetChannel = interaction.options.getChannel('channel');
+      const message = interaction.options.getString('message');
+      console.log(`📨 匿名メッセージ: ${interaction.user.username} (${interaction.user.id}) → #${targetChannel.name} : "${message}"`);
+      try {
+        const ch = await client.channels.fetch(targetChannel.id);
+        await ch.send(`🕵️ 誰かが匿名メッセージを送信しました\n${message}`);
+        return interaction.reply({ content: '✅ 匿名メッセージを送信しました', flags: 64 });
+      } catch (e) { return interaction.reply({ content: `❌ 送信失敗: ${e.message}`, flags: 64 }); }
+    }
+
+    case 'version': {
+      return interaction.reply('🤖 TKイベントリマインダーBot **v2.23.15**');
+    }
+
+    case 'state-export': {
+      const isAdmin = interaction.member?.permissions?.has?.('Administrator') ?? false;
+      if (!isAdmin) return interaction.reply({ content: '⛔ 管理者専用です', flags: 64 });
+      const state = {
+        exportedAt: new Date().toISOString(),
+        version: '2.25.15',
+        morningTime: db.data.morningTime,
+        reminderOffsets: db.data.reminderOffsets,
+        eventMap: db.data.eventMap,
+        eventRoles: db.data.eventRoles,
+        reminderMsgMap: db.data.reminderMsgMap,
+        lastReminderMsgIds: db.data.lastReminderMsgIds,
+        vcExcludeUsers: db.data.vcExcludeUsers,
+        activeVcSessions: db.data.activeVcSessions,
+        pendingDeleteSessions: db.data.pendingDeleteSessions,
+        saylaterJobs: db.data.saylaterJobs,
+      };
+      const buf = Buffer.from(JSON.stringify(state, null, 2), 'utf-8');
+      const filename = `bot-state-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+      return interaction.reply({
+        content: `✅ 状態をエクスポートしました（${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}）`,
+        files: [new AttachmentBuilder(buf, { name: filename })],
+        flags: 64
+      });
+    }
+
+    case 'state-import': {
+      const isAdmin = interaction.member?.permissions?.has?.('Administrator') ?? false;
+      if (!isAdmin) return interaction.reply({ content: '⛔ 管理者専用です', flags: 64 });
+      await interaction.deferReply({ flags: 64 });
+      const att = interaction.options.getAttachment('file');
+      try {
+        const json = await (await fetch(att.url)).json();
+        if (!json.version || !json.exportedAt) return interaction.editReply('❌ 正しいエクスポートファイルではありません');
+        if (json.morningTime)                    db.data.morningTime           = json.morningTime;
+        if (Array.isArray(json.reminderOffsets)) db.data.reminderOffsets       = json.reminderOffsets;
+        if (json.eventMap)                       db.data.eventMap              = json.eventMap;
+        if (json.eventRoles)                     db.data.eventRoles            = json.eventRoles;
+        if (json.reminderMsgMap)                 db.data.reminderMsgMap        = json.reminderMsgMap;
+        if (Array.isArray(json.lastReminderMsgIds)) db.data.lastReminderMsgIds = json.lastReminderMsgIds;
+        if (Array.isArray(json.vcExcludeUsers))  db.data.vcExcludeUsers        = json.vcExcludeUsers;
+        if (json.activeVcSessions)               db.data.activeVcSessions      = json.activeVcSessions;
+        if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
+        if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
+        await db.write();
+        bootstrapSchedules();
+        const exportedAt = new Date(json.exportedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+        return interaction.editReply(
+          `✅ 状態をインポートしました\n　エクスポート日時: ${exportedAt}\n` +
+          `　イベント記録: ${Object.keys(json.eventMap ?? {}).length}件\n` +
+          `　ロール記録: ${Object.keys(json.eventRoles ?? {}).length}件\n` +
+          `　リマインドメッセージ: ${(json.lastReminderMsgIds ?? []).length}件\n` +
+          `　除外ユーザー: ${(json.vcExcludeUsers ?? []).length}名\n\n` +
+          `cronを再登録しました。リマインド収集はそのまま継続されます。`
+        );
+      } catch (e) { return interaction.editReply(`❌ インポート失敗: ${e.message}`); }
+    }
+
+    case 'saylatter-rel': {
+      const value   = interaction.options.getInteger('value');
+      const unit    = interaction.options.getString('unit');
+      const message = interaction.options.getString('message');
+      const mentionUser     = interaction.options.getUser('mention') ?? interaction.user;
+      const targetChannel   = interaction.options.getChannel('channel');
+      const targetChannelId = targetChannel?.id ?? DEFAULT_REMIND_CHANNEL_ID;
+
+      const msMap    = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
+      const unitLabel = { minutes: '分', hours: '時間', days: '日' };
+      const fireAt   = new Date(Date.now() + value * msMap[unit]);
+      const fireAtJst = fireAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const jst  = new Date(fireAt.getTime() + 9 * 60 * 60 * 1000);
+      const expr = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+      const desc = `simple-remind:${interaction.id}`;
+
+      // DBに保存して継承できるようにする
+      db.data.saylaterJobs[interaction.id] = {
+        fireAt: fireAt.toISOString(),
+        message,
+        mentionId: mentionUser.id,
+        channelId: targetChannelId,
+      };
+      await db.write();
+
+      registerCron(expr, async () => {
+        try {
+          const ch = await client.channels.fetch(targetChannelId);
+          await ch.send(`<@${mentionUser.id}>\n${message}`);
+        } catch (e) { console.error(`❌ 伝言予約送信失敗:`, e.message); }
+        delete db.data.saylaterJobs[interaction.id];
+        await db.write();
+        if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
+      }, desc);
+
+      return interaction.reply({
+        content: `✅ 伝言予約を設定しました\n　⏰ ${value}${unitLabel[unit]}後 (${fireAtJst})\n　📝 ${message}\n　👤 <@${mentionUser.id}>\n　📍 <#${targetChannelId}>`,
+        flags: 64
+      });
+    }
+
+    case 'saylatter-abs': {
+      const month   = interaction.options.getInteger('month');
+      const day     = interaction.options.getInteger('day');
+      const time    = interaction.options.getString('time');
+      const message = interaction.options.getString('message');
+      const mentionUser     = interaction.options.getUser('mention') ?? interaction.user;
+      const targetChannel   = interaction.options.getChannel('channel');
+      const targetChannelId = targetChannel?.id ?? DEFAULT_REMIND_CHANNEL_ID;
+
+      const [h, m] = time.split(':').map(Number);
+      const nowJst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+      const fireAt = new Date(Date.UTC(nowJst.getFullYear(), month - 1, day, h - 9, m, 0));
+
+      if (fireAt <= Date.now()) {
+        return interaction.reply({ content: '❌ 指定した日時はすでに過去です', flags: 64 });
+      }
+
+      const fireAtJst = fireAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const jst  = new Date(fireAt.getTime() + 9 * 60 * 60 * 1000);
+      const expr = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+      const desc = `simple-remind:${interaction.id}`;
+
+      // DBに保存して継承できるようにする
+      db.data.saylaterJobs[interaction.id] = {
+        fireAt: fireAt.toISOString(),
+        message,
+        mentionId: mentionUser.id,
+        channelId: targetChannelId,
+      };
+      await db.write();
+
+      registerCron(expr, async () => {
+        try {
+          const ch = await client.channels.fetch(targetChannelId);
+          await ch.send(`<@${mentionUser.id}>\n${message}`);
+        } catch (e) { console.error(`❌ 伝言予約送信失敗:`, e.message); }
+        delete db.data.saylaterJobs[interaction.id];
+        await db.write();
+        if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
+      }, desc);
+
+      return interaction.reply({
+        content: `✅ 伝言予約を設定しました\n　⏰ ${month}/${day} ${time} (${fireAtJst})\n　📝 ${message}\n　👤 <@${mentionUser.id}>\n　📍 <#${targetChannelId}>`,
+        flags: 64
+      });
     }
   }
 });
