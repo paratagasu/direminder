@@ -26,7 +26,6 @@ const {
 } = process.env;
 const PORT = process.env.PORT ?? 3000;
 const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
-const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ 必要な環境変数が不足しています');
