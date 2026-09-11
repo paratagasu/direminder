@@ -1,5 +1,5 @@
 // index.js
-// Version: 2.25.17
+// Version: 2.27.18
 
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
@@ -299,7 +299,13 @@ async function queryMemberCalendars(target, targetHour) {
         orderBy: 'startTime',
       });
       for (const ev of (res.data.items ?? [])) {
-        results.push({ member: name, title: ev.summary, start: ev.start.dateTime ?? ev.start.date });
+        const isAllDay = !ev.start.dateTime;
+        results.push({
+          member: name,
+          title: ev.summary,
+          start: isAllDay ? ev.start.date : ev.start.dateTime,
+          allDay: isAllDay,
+        });
       }
     } catch (e) { console.error(`❌ ${name}カレンダー取得失敗:`, e.message); }
   }
@@ -309,6 +315,7 @@ async function queryMemberCalendars(target, targetHour) {
 function formatCalendarResults(results, dateLabel) {
   if (results.length === 0) return `${dateLabel}\nこの時間の予定はありません`;
   const lines = results.map(r => {
+    if (r.allDay || (r.start && !r.start.includes('T'))) return `・【${r.member}】${r.title}\n　[終日]`;
     const time = new Date(r.start).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
     return `・【${r.member}】${r.title}\n　${time}〜`;
   });
@@ -652,9 +659,11 @@ function extractGifUrl(item) {
 }
 
 async function getRandomGif() {
-  const data = await klipyFetch('/gifs/trending?limit=50');
-  const items = data.data ?? data.results ?? [];
-  if (items.length === 0) throw new Error('GIFが取得できませんでした');
+  const randomWords = ['funny', 'happy', 'cool', 'wow', 'yes', 'ok', 'love', 'party', 'amazing', 'cute'];
+  const word = randomWords[Math.floor(Math.random() * randomWords.length)];
+  const data = await klipyFetch(`/gifs/search?q=${encodeURIComponent(word)}&limit=50`);
+  const items = data.data ?? data.results ?? data.gifs ?? [];
+  if (!Array.isArray(items) || items.length === 0) throw new Error('GIFが取得できませんでした');
   const item = items[Math.floor(Math.random() * items.length)];
   return extractGifUrl(item);
 }
@@ -967,6 +976,11 @@ client.once('ready', async () => {
       .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル（デフォルト: いろいろ）').setRequired(false)),
     new SlashCommandBuilder()
       .setName('saylatter-abs').setDescription('伝言予約：日付と時刻を指定して送信する')
+    new SlashCommandBuilder()
+      .setName('saylatter-list').setDescription('設定中の伝言予約一覧を表示する'),
+    new SlashCommandBuilder()
+      .setName('saylatter-cancel').setDescription('伝言予約をキャンセルする')
+      .addIntegerOption(o => o.setName('number').setDescription('キャンセルする番号（/saylatter-listで確認）').setRequired(true).setMinValue(1)),
       .addIntegerOption(o => o.setName('month').setDescription('月').setRequired(true).setMinValue(1).setMaxValue(12))
       .addIntegerOption(o => o.setName('day').setDescription('日').setRequired(true).setMinValue(1).setMaxValue(31))
       .addStringOption(o => o.setName('time').setDescription('時刻（例: 20:00）').setRequired(true))
@@ -1242,26 +1256,27 @@ client.on('interactionCreate', async interaction => {
       const memberCfg = MEMBER_CONFIG[interaction.user.id];
       if (!memberCfg) return interaction.reply({ content: '⚠️ カレンダーが設定されていません', flags: 64 });
 
-      const weeks  = interaction.options.getInteger('weeks');
-      const now    = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const future = new Date(now.getTime() + weeks * 7 * 24 * 60 * 60 * 1000);
-
-      await interaction.deferReply({ flags: 64 });
+      const weeks = interaction.options.getInteger('weeks');
+      const nowJst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+      const todayStartJst = new Date(nowJst.getFullYear(), nowJst.getMonth(), nowJst.getDate(), 0, 0, 0);
+      const timeMin = new Date(todayStartJst.getTime() - 9 * 60 * 60 * 1000);
+      const timeMax = new Date(todayStartJst.getTime() + weeks * 7 * 24 * 60 * 60 * 1000 - 9 * 60 * 60 * 1000);
 
       try {
         const res = await calendar.events.list({
           calendarId: memberCfg.calendarId,
-          timeMin: now.toISOString(),
-          timeMax: future.toISOString(),
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
           singleEvents: true,
           orderBy: 'startTime',
           maxResults: 19,
         });
         const events = res.data.items ?? [];
-        if (events.length === 0) return interaction.editReply('📭 予定がありません');
 
         const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟',
                               '1️⃣1️⃣','1️⃣2️⃣','1️⃣3️⃣','1️⃣4️⃣','1️⃣5️⃣','1️⃣6️⃣','1️⃣7️⃣','1️⃣8️⃣','1️⃣9️⃣'];
+
+        if (events.length === 0) return interaction.reply({ content: '📭 予定がありません', flags: 64 });
 
         let msg = `📋 ${weeks}週間以内の予定一覧:\n`;
         events.forEach((ev, i) => {
@@ -1276,16 +1291,14 @@ client.on('interactionCreate', async interaction => {
         });
         msg += '\n数字リアクションで削除する予定を選択してください。❌でキャンセル。';
 
-        const sent = await interaction.editReply({ content: msg });
+        await interaction.reply({ content: msg });
         const sentMsg = await interaction.fetchReply();
 
-        // リアクションを付ける
         await sentMsg.react('❌');
         for (let i = 0; i < Math.min(events.length, 10); i++) {
           await sentMsg.react(numberEmojis[i]);
         }
 
-        // セッションを保存
         db.data.pendingDeleteSessions[interaction.user.id] = {
           msgId: sentMsg.id,
           requesterId: interaction.user.id,
@@ -1293,7 +1306,11 @@ client.on('interactionCreate', async interaction => {
           calendarId: memberCfg.calendarId,
         };
         await db.write();
-      } catch (e) { return interaction.editReply(`❌ 取得失敗: ${e.message}`); }
+      } catch (e) {
+        const msg = `❌ 取得失敗: ${e.message}`;
+        if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: msg, flags: 64 });
+        return interaction.editReply(msg).catch(() => {});
+      }
       break;
     }
 
@@ -1353,7 +1370,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     case 'version': {
-      return interaction.reply('🤖 TKイベントリマインダーBot **v2.25.17**');
+      return interaction.reply('🤖 TKイベントリマインダーBot **v2.27.18**');
     }
 
     case 'state-export': {
@@ -1361,7 +1378,7 @@ client.on('interactionCreate', async interaction => {
       if (!isAdmin) return interaction.reply({ content: '⛔ 管理者専用です', flags: 64 });
       const state = {
         exportedAt: new Date().toISOString(),
-        version: '2.25.17',
+        version: '2.27.18',
         morningTime: db.data.morningTime,
         reminderOffsets: db.data.reminderOffsets,
         eventMap: db.data.eventMap,
@@ -1414,6 +1431,34 @@ client.on('interactionCreate', async interaction => {
       } catch (e) { return interaction.editReply(`❌ インポート失敗: ${e.message}`); }
     }
 
+    case 'saylatter-list': {
+      const jobs = Object.entries(db.data.saylaterJobs ?? {});
+      if (jobs.length === 0) return interaction.reply({ content: '📭 設定中の伝言予約はありません', flags: 64 });
+      let msg = `📬 **伝言予約一覧** (${jobs.length}件)\n\n`;
+      jobs.forEach(([id, job], i) => {
+        const fireAtJst = new Date(job.fireAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        msg += `${i+1}. ⏰ ${fireAtJst}\n　📝 ${job.message.slice(0, 30)}${job.message.length > 30 ? '…' : ''}\n　👤 <@${job.mentionId}> → <#${job.channelId}>\n\n`;
+      });
+      msg += '`/saylatter-cancel number:番号` でキャンセルできます';
+      return interaction.reply({ content: msg, flags: 64 });
+    }
+
+    case 'saylatter-cancel': {
+      const number = interaction.options.getInteger('number');
+      const jobs = Object.entries(db.data.saylaterJobs ?? {});
+      if (jobs.length === 0) return interaction.reply({ content: '📭 設定中の伝言予約はありません', flags: 64 });
+      if (number > jobs.length) return interaction.reply({ content: `❌ 番号 ${number} の予約は存在しません（現在${jobs.length}件）`, flags: 64 });
+      const [id, job] = jobs[number - 1];
+      const fireAtJst = new Date(job.fireAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      // cronを停止
+      const desc = `simple-remind:${id}`;
+      if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
+      // DBから削除
+      delete db.data.saylaterJobs[id];
+      await db.write();
+      return interaction.reply({ content: `✅ 伝言予約をキャンセルしました\n　⏰ ${fireAtJst}\n　📝 ${job.message}`, flags: 64 });
+    }
+
     case 'saylatter-rel': {
       const value   = interaction.options.getInteger('value');
       const unit    = interaction.options.getString('unit');
@@ -1450,8 +1495,7 @@ client.on('interactionCreate', async interaction => {
       }, desc);
 
       return interaction.reply({
-        content: `✅ 伝言予約を設定しました\n　⏰ ${value}${unitLabel[unit]}後 (${fireAtJst})\n　📝 ${message}\n　👤 <@${mentionUser.id}>\n　📍 <#${targetChannelId}>`,
-        flags: 64
+        content: `✅ 伝言予約を設定しました\n　⏰ ${value}${unitLabel[unit]}後 (${fireAtJst})\n　📝 ${message}\n　👤 ${mentionUser.displayName ?? mentionUser.username}\n　📍 <#${targetChannelId}>`,
       });
     }
 
@@ -1497,8 +1541,7 @@ client.on('interactionCreate', async interaction => {
       }, desc);
 
       return interaction.reply({
-        content: `✅ 伝言予約を設定しました\n　⏰ ${month}/${day} ${time} (${fireAtJst})\n　📝 ${message}\n　👤 <@${mentionUser.id}>\n　📍 <#${targetChannelId}>`,
-        flags: 64
+        content: `✅ 伝言予約を設定しました\n　⏰ ${month}/${day} ${time} (${fireAtJst})\n　📝 ${message}\n　👤 ${mentionUser.displayName ?? mentionUser.username}\n　📍 <#${targetChannelId}>`,
       });
     }
   }
