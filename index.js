@@ -976,17 +976,17 @@ client.once('ready', async () => {
       .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル（デフォルト: いろいろ）').setRequired(false)),
     new SlashCommandBuilder()
       .setName('saylatter-abs').setDescription('伝言予約：日付と時刻を指定して送信する')
-    new SlashCommandBuilder()
-      .setName('saylatter-list').setDescription('設定中の伝言予約一覧を表示する'),
-    new SlashCommandBuilder()
-      .setName('saylatter-cancel').setDescription('伝言予約をキャンセルする')
-      .addIntegerOption(o => o.setName('number').setDescription('キャンセルする番号（/saylatter-listで確認）').setRequired(true).setMinValue(1)),
       .addIntegerOption(o => o.setName('month').setDescription('月').setRequired(true).setMinValue(1).setMaxValue(12))
       .addIntegerOption(o => o.setName('day').setDescription('日').setRequired(true).setMinValue(1).setMaxValue(31))
       .addStringOption(o => o.setName('time').setDescription('時刻（例: 20:00）').setRequired(true))
       .addStringOption(o => o.setName('message').setDescription('リマインド本文').setRequired(true))
       .addUserOption(o => o.setName('mention').setDescription('メンション相手（デフォルト: 自分）').setRequired(false))
       .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル（デフォルト: いろいろ）').setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('saylatter-list').setDescription('設定中の伝言予約一覧を表示する'),
+    new SlashCommandBuilder()
+      .setName('saylatter-cancel').setDescription('伝言予約をキャンセルする')
+      .addIntegerOption(o => o.setName('number').setDescription('キャンセルする番号（/saylatter-listで確認）').setRequired(true).setMinValue(1)),
   ].map(c => c.toJSON());
 
   await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
