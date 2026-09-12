@@ -1562,10 +1562,7 @@ client.on('interactionCreate', async interaction => {
       msg += `過去30日で **${recent.length}回** のグッジョブを受けています（累計: ${total}回 / GJP: ${points.gjp}）
 `;
       const reasons = recent.filter(h => h.reason).slice(-5).map(h => `・${h.reason}`);
-      if (reasons.length > 0) msg += `
-最近の理由：
-${reasons.join('
-')}`;
+      if (reasons.length > 0) msg += `\n最近の理由：\n${reasons.join('\n')}`;
       return interaction.reply({ content: msg, flags: 64 });
     }
 
