@@ -15,6 +15,11 @@ import {
   joinVoiceChannel, getVoiceConnection
 } from '@discordjs/voice';
 import * as dotenv from 'dotenv';
+import {
+  GOOD_JOB_EMOJI_ID, GOOD_JOB_EMOJI_NAME, GJ_ANNOUNCE_CHANNEL,
+  initGjData, getGjPoints, getDailySentCount,
+  sendGoodJob, checkAchievements, sendMonthlyAwards,
+} from './gj.js';
 dotenv.config();
 
 // ============================================================
@@ -116,6 +121,7 @@ const defaultData = {
   activeVcSessions: {},
   pendingDeleteSessions: {}, // userId → { msgId, events[], calendarId }
   saylaterJobs: {},          // interactionId → { fireAt, message, mentionId, channelId }
+  gjData: { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} },
 };
 
 const adapter = new JSONFile('settings.json');
@@ -130,6 +136,13 @@ db.data.vcExcludeUsers       ??= [];
 db.data.activeVcSessions     ??= {};
 db.data.pendingDeleteSessions ??= {};
 db.data.saylaterJobs         ??= {};
+initGjData(db);
+db.data.gjData               ??= { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
+db.data.gjData.points        ??= {};
+db.data.gjData.history       ??= [];
+db.data.gjData.achievements  ??= {};
+db.data.gjData.dailySent     ??= {};
+db.data.gjData.monthlyCounters ??= {};
 if (!Array.isArray(db.data.reminderOffsets)) db.data.reminderOffsets = [60, 15];
 await db.write();
 
@@ -354,6 +367,43 @@ async function startVcSession(event) {
 async function endVcSession(eventId, eventName) {
   try {
     const connection = getVoiceConnection(GUILD_ID);
+
+    // 会議参加者にBotからGJを送信
+    const session = db.data.activeVcSessions[eventId];
+    if (session && session.participants.length > 0) {
+      const guild = await client.guilds.fetch(GUILD_ID);
+      // 参加予定者ロールが設定されていればロール持ちのみ、なければ全員
+      const roleId = db.data.eventRoles[eventId];
+      let targets = session.participants;
+      if (roleId) {
+        const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null);
+        if (role) targets = session.participants.filter(id => role.members.has(id));
+      }
+      if (targets.length > 0) {
+        try {
+          const ch = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
+          const mentions = targets.map(id => `<@${id}>`).join('');
+          await ch.send({ content: `${mentions}
+🔥 お前等、ナイス会議参加だったぜ！！俺からお前等全員にGJを送ってやる！！`, allowedMentions: { users: targets } });
+          for (const uid of targets) {
+            const member = await guild.members.fetch(uid).catch(() => null);
+            if (!member) continue;
+            // BotからのGJ（GJPのみ付与、GSPなし）
+            const toPoints = getGjPoints(db, uid);
+            toPoints.gjp++;
+            db.data.gjData.monthlyCounters[uid] ??= { gjCounterCount: 0, monthlyGjp: 0, monthlyGsp: 0, uniqueSenders: [] };
+            db.data.gjData.monthlyCounters[uid].monthlyGjp++;
+            db.data.gjData.history.push({
+              from: client.user.id, to: uid, reason: 'ナイス会議参加!!!',
+              anonymous: false, channelId: ANNOUNCE_CHANNEL_ID, timestamp: new Date().toISOString()
+            });
+            await checkAchievements(db, client, GUILD_ID, uid, 'received', ch);
+          }
+          await db.write();
+        } catch (e) { console.error('会議GJ送信失敗:', e.message); }
+      }
+    }
+
     if (connection) connection.destroy();
     await writeParticipantsToCalendar(eventId, eventName);
     delete db.data.activeVcSessions[eventId];
@@ -596,6 +646,10 @@ function bootstrapSchedules() {
   }, 'event-resync');
   // 伝言予約ジョブを復元
   restoreSaylaterJobs();
+  // 月間表彰（毎月末日23:59）
+  registerCron('59 23 L * *', async () => {
+    await sendMonthlyAwards(db, client, GUILD_ID);
+  }, 'monthly-awards');
 }
 
 function restoreSaylaterJobs() {
@@ -733,6 +787,34 @@ const client = new Client({
 // ============================================================
 async function handleReaction(reaction, user, add) {
   if (user.bot) return;
+
+  // GOOD_JOBリアクション処理
+  if (reaction.emoji.id === GOOD_JOB_EMOJI_ID || reaction.emoji.name === GOOD_JOB_EMOJI_NAME) {
+    if (add) {
+      const fromId   = user.id;
+      const toId     = reaction.message.author?.id;
+      if (toId && fromId !== toId && !reaction.message.author?.bot) {
+        try {
+          const guild   = reaction.message.guild;
+          const fromMember = await guild.members.fetch(fromId).catch(() => null);
+          const toMember   = await guild.members.fetch(toId).catch(() => null);
+          if (fromMember && toMember) {
+            const ch = reaction.message.channel;
+            console.log(`👍 GJリアクション: ${fromMember.displayName} → ${toMember.displayName}`);
+            const result = await sendGoodJob(db, client, GUILD_ID, {
+              fromId, fromName: fromMember.displayName,
+              toId,   toName:   toMember.displayName,
+              reason: null, anonymous: false, channel: ch
+            });
+            if (!result.success) {
+              await ch.send({ content: result.reason, flags: 64 }).catch(() => {});
+            }
+          }
+        } catch (e) { console.error('GJリアクション処理失敗:', e.message); }
+      }
+    }
+    return;
+  }
 
   // 朝リマインドの出欠リアクション
   if (reaction.emoji.name === '✅') {
@@ -982,6 +1064,16 @@ client.once('ready', async () => {
       .addStringOption(o => o.setName('message').setDescription('リマインド本文').setRequired(true))
       .addUserOption(o => o.setName('mention').setDescription('メンション相手（デフォルト: 自分）').setRequired(false))
       .addChannelOption(o => o.setName('channel').setDescription('送信先チャンネル（デフォルト: いろいろ）').setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('goodjob').setDescription('グッジョブを送信する')
+      .addUserOption(o => o.setName('target').setDescription('対象ユーザー').setRequired(true))
+      .addStringOption(o => o.setName('reason').setDescription('一言コメント（任意）').setRequired(false))
+      .addBooleanOption(o => o.setName('anonymous').setDescription('匿名にする（匿名はGSP付与なし）').setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('goodjob-history').setDescription('グッジョブ履歴を確認する')
+      .addUserOption(o => o.setName('target').setDescription('確認するユーザー（省略で自分）').setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('goodjob-ranking').setDescription('グッジョブランキングを表示する'),
     new SlashCommandBuilder()
       .setName('saylatter-list').setDescription('設定中の伝言予約一覧を表示する'),
     new SlashCommandBuilder()
@@ -1389,6 +1481,8 @@ client.on('interactionCreate', async interaction => {
         activeVcSessions: db.data.activeVcSessions,
         pendingDeleteSessions: db.data.pendingDeleteSessions,
         saylaterJobs: db.data.saylaterJobs,
+        gjData: db.data.gjData,
+        gjData: db.data.gjData,
       };
       const buf = Buffer.from(JSON.stringify(state, null, 2), 'utf-8');
       const filename = `bot-state-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
@@ -1417,6 +1511,8 @@ client.on('interactionCreate', async interaction => {
         if (json.activeVcSessions)               db.data.activeVcSessions      = json.activeVcSessions;
         if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
         if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
+        if (json.gjData)                         { db.data.gjData = json.gjData; initGjData(db); }
+        if (json.gjData)                         db.data.gjData                 = json.gjData;
         await db.write();
         bootstrapSchedules();
         const exportedAt = new Date(json.exportedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
@@ -1429,6 +1525,68 @@ client.on('interactionCreate', async interaction => {
           `cronを再登録しました。リマインド収集はそのまま継続されます。`
         );
       } catch (e) { return interaction.editReply(`❌ インポート失敗: ${e.message}`); }
+    }
+
+    case 'goodjob': {
+      const target    = interaction.options.getUser('target');
+      const reason    = interaction.options.getString('reason') ?? null;
+      const anonymous = interaction.options.getBoolean('anonymous') ?? false;
+      if (anonymous) {
+        console.log(`👍 匿名GJ送信: ${interaction.user.username} (${interaction.user.id}) → ${target.username} (${target.id})`);
+      }
+      const guild      = await client.guilds.fetch(GUILD_ID);
+      const fromMember = await guild.members.fetch(interaction.user.id).catch(() => null);
+      const toMember   = await guild.members.fetch(target.id).catch(() => null);
+      if (!fromMember || !toMember) return interaction.reply({ content: '❌ ユーザーが見つかりません', flags: 64 });
+      const ch = await client.channels.fetch(interaction.channelId);
+      const result = await sendGoodJob(db, client, GUILD_ID, {
+        fromId: interaction.user.id, fromName: fromMember.displayName,
+        toId: target.id, toName: toMember.displayName,
+        reason, anonymous, channel: ch
+      });
+      if (!result.success) return interaction.reply({ content: result.reason, flags: 64 });
+      return interaction.reply({ content: '✅ グッジョブを送信しました！', flags: 64 });
+    }
+
+    case 'goodjob-history': {
+      const target = interaction.options.getUser('target') ?? interaction.user;
+      const now    = Date.now();
+      const days30 = 30 * 24 * 60 * 60 * 1000;
+      const recent = (db.data.gjData.history ?? []).filter(h =>
+        h.to === target.id && now - new Date(h.timestamp).getTime() < days30
+      );
+      const total  = (db.data.gjData.history ?? []).filter(h => h.to === target.id).length;
+      const points = getGjPoints(db, target.id);
+      let msg = `📊 **${target.displayName ?? target.username}** のグッジョブ履歴
+`;
+      msg += `過去30日で **${recent.length}回** のグッジョブを受けています（累計: ${total}回 / GJP: ${points.gjp}）
+`;
+      const reasons = recent.filter(h => h.reason).slice(-5).map(h => `・${h.reason}`);
+      if (reasons.length > 0) msg += `
+最近の理由：
+${reasons.join('
+')}`;
+      return interaction.reply({ content: msg, flags: 64 });
+    }
+
+    case 'goodjob-ranking': {
+      const points = db.data.gjData.points ?? {};
+      const sorted = Object.entries(points).sort((a,b) => b[1].gjp - a[1].gjp).slice(0, 10);
+      if (sorted.length === 0) return interaction.reply('📭 まだグッジョブの記録がありません');
+      const guild = await client.guilds.fetch(GUILD_ID);
+      let msg = `🏆 **グッジョブランキング**
+
+`;
+      const medals = ['🥇','🥈','🥉'];
+      for (let i = 0; i < sorted.length; i++) {
+        const [uid, pts] = sorted[i];
+        const m = await guild.members.fetch(uid).catch(() => null);
+        const name = m?.displayName ?? uid;
+        const medal = medals[i] ?? `${i+1}.`;
+        msg += `${medal} **${name}** - ${pts.gjp} GJP / ${pts.gsp} GSP
+`;
+      }
+      return interaction.reply(msg);
     }
 
     case 'saylatter-list': {
