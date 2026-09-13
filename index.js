@@ -700,16 +700,20 @@ async function klipyFetch(endpoint) {
 
 function extractGifUrl(item) {
   if (!item) return null;
-  // data.media がオブジェクト形式の場合
+  // 直接URLを持つ場合
+  if (typeof item.url === 'string' && item.url.includes('http')) return item.url;
+  // media がオブジェクト形式
   if (item.media && !Array.isArray(item.media)) {
-    return item.media.gif?.url ?? item.media.tinygif?.url ?? item.media.mediumgif?.url ?? null;
+    return item.media.gif?.url ?? item.media.tinygif?.url ?? item.media.mediumgif?.url
+        ?? item.media.nanogif?.url ?? null;
   }
-  // data.media が配列形式（Tenor互換）の場合
+  // media が配列形式（Tenor互換）
   if (Array.isArray(item.media) && item.media[0]) {
     const m = item.media[0];
-    return m.gif?.url ?? m.tinygif?.url ?? m.mediumgif?.url ?? null;
+    return m.gif?.url ?? m.tinygif?.url ?? m.mediumgif?.url ?? m.nanogif?.url ?? null;
   }
-  return item.url ?? null;
+  // その他のフィールドを探す
+  return item.gif_url ?? item.images?.original?.url ?? null;
 }
 
 async function getRandomGif() {
@@ -717,9 +721,18 @@ async function getRandomGif() {
   const word = randomWords[Math.floor(Math.random() * randomWords.length)];
   const data = await klipyFetch(`/gifs/search?q=${encodeURIComponent(word)}&limit=50`);
   const items = data.data ?? data.results ?? data.gifs ?? [];
-  if (!Array.isArray(items) || items.length === 0) throw new Error('GIFが取得できませんでした');
+  if (!Array.isArray(items) || items.length === 0) {
+    console.log('🎬 GIF response sample:', JSON.stringify(data).slice(0, 300));
+    throw new Error('GIFが取得できませんでした');
+  }
   const item = items[Math.floor(Math.random() * items.length)];
-  return extractGifUrl(item);
+  console.log('🎬 GIF item sample:', JSON.stringify(item).slice(0, 200));
+  const url = extractGifUrl(item);
+  if (!url) {
+    console.log('🎬 extractGifUrl failed, item keys:', Object.keys(item).join(', '));
+    throw new Error('GIFのURLが取得できませんでした');
+  }
+  return url;
 }
 
 async function getKlipyCategories() {
@@ -799,7 +812,10 @@ async function handleReaction(reaction, user, add) {
           const fromMember = await guild.members.fetch(fromId).catch(() => null);
           const toMember   = await guild.members.fetch(toId).catch(() => null);
           if (fromMember && toMember) {
-            const ch = reaction.message.channel;
+            // partialの場合はfetchして確実にチャンネルを取得
+            const ch = reaction.message.channel.partial
+              ? await reaction.message.channel.fetch().catch(() => reaction.message.channel)
+              : reaction.message.channel;
             console.log(`👍 GJリアクション: ${fromMember.displayName} → ${toMember.displayName}`);
             const result = await sendGoodJob(db, client, GUILD_ID, {
               fromId, fromName: fromMember.displayName,
@@ -1074,6 +1090,8 @@ client.once('ready', async () => {
       .addUserOption(o => o.setName('target').setDescription('確認するユーザー（省略で自分）').setRequired(false)),
     new SlashCommandBuilder()
       .setName('goodjob-ranking').setDescription('グッジョブランキングを表示する'),
+    new SlashCommandBuilder()
+      .setName('goodjob-status').setDescription('自分のグッジョブステータスを確認する'),
     new SlashCommandBuilder()
       .setName('saylatter-list').setDescription('設定中の伝言予約一覧を表示する'),
     new SlashCommandBuilder()
@@ -1511,7 +1529,14 @@ client.on('interactionCreate', async interaction => {
         if (json.activeVcSessions)               db.data.activeVcSessions      = json.activeVcSessions;
         if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
         if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
-        if (json.gjData)                         { db.data.gjData = json.gjData; initGjData(db); }
+        // gjDataは完全に置き換え
+        if (json.gjData !== undefined) {
+          db.data.gjData = json.gjData;
+          initGjData(db);
+        } else {
+          // gjDataがない場合はリセット
+          db.data.gjData = { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
+        }
         if (json.gjData)                         db.data.gjData                 = json.gjData;
         await db.write();
         bootstrapSchedules();
@@ -1563,6 +1588,47 @@ client.on('interactionCreate', async interaction => {
 `;
       const reasons = recent.filter(h => h.reason).slice(-5).map(h => `・${h.reason}`);
       if (reasons.length > 0) msg += `\n最近の理由：\n${reasons.join('\n')}`;
+      return interaction.reply({ content: msg, flags: 64 });
+    }
+
+    case 'goodjob-status': {
+      const userId = interaction.user.id;
+      const points = getGjPoints(db, userId);
+      const mc     = db.data.gjData.monthlyCounters?.[userId] ?? { monthlyGjp: 0, monthlyGsp: 0 };
+      const ach    = db.data.gjData.achievements?.[userId] ?? { received: [], sent: [] };
+
+      const achLabels = {
+        received: { first: '🌱 初GJ', '10': '👍 GJ 10回', '100': '🔥 GJ 100回', '500': '👑 GJ 500回', '10src': '💎 10人以上からGJ', '7streak': '🌟 7日連続GJ' },
+        sent:     { first: '🤝 初GJ送信', '10tgt': '❤️ 10人にGJ', '20tgt': '🌎 20人以上にGJ', '10day': '🫂 1日10GJ' },
+      };
+
+      const receivedAch = ach.received.map(k => achLabels.received[k] ?? k).join('、') || '（なし）';
+      const sentAch     = ach.sent.map(k => achLabels.sent[k] ?? k).join('、') || '（なし）';
+
+      const now = Date.now();
+      const history = db.data.gjData.history ?? [];
+      const received30 = history.filter(h => h.to === userId && now - new Date(h.timestamp).getTime() < 30 * 24 * 60 * 60 * 1000).length;
+      const sent30     = history.filter(h => h.from === userId && !h.anonymous && now - new Date(h.timestamp).getTime() < 30 * 24 * 60 * 60 * 1000).length;
+
+      const msg = [
+        `📊 **${interaction.user.displayName ?? interaction.user.username}** のGJステータス`,
+        '',
+        `**📈 累計**`,
+        `　GJP（受け取り）: ${points.gjp}`,
+        `　GSP（送り）: ${points.gsp}`,
+        '',
+        `**📅 今月**`,
+        `　GJP: ${mc.monthlyGjp}　GSP: ${mc.monthlyGsp}`,
+        '',
+        `**📆 過去30日**`,
+        `　受け取ったGJ: ${received30}回　送ったGJ: ${sent30}回`,
+        '',
+        `**🏆 解除済み実績**`,
+        `　受け取り側: ${receivedAch}`,
+        `　送り側: ${sentAch}`,
+      ].join('
+');
+
       return interaction.reply({ content: msg, flags: 64 });
     }
 
