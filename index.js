@@ -541,13 +541,15 @@ async function scheduleEventReminders() {
   // 今日のイベントIDセット
   const todayEventIds = new Set([...events.values()].map(e => e.id));
 
-  // 削除されたイベントのcronを停止
-  for (const eventId of registeredEventIds) {
+  // 削除・キャンセルされたイベントのcronを停止
+  for (const eventId of [...registeredEventIds]) {
     if (!todayEventIds.has(eventId)) {
-      // このイベントのcronを全部停止
-      for (const [desc, job] of jobMap.entries()) {
-        if (desc.includes(`'`) && desc.includes(eventId) || desc.endsWith(`'${[...events.values()].find(e => e.id === eventId)?.name ?? ''}' -60m`) ) {
-          job.stop(); jobMap.delete(desc);
+      // このイベントIDに関連するcronを全て停止
+      for (const [desc, job] of [...jobMap.entries()]) {
+        if (desc.includes(`:${eventId}:`) || desc.includes(`:${eventId}`)) {
+          job.stop();
+          jobMap.delete(desc);
+          console.log(`🗑️ cronを削除: ${desc}`);
         }
       }
       registeredEventIds.delete(eventId);
@@ -1626,8 +1628,7 @@ client.on('interactionCreate', async interaction => {
         `**🏆 解除済み実績**`,
         `　受け取り側: ${receivedAch}`,
         `　送り側: ${sentAch}`,
-      ].join('
-');
+      ].join('\n');
 
       return interaction.reply({ content: msg, flags: 64 });
     }
