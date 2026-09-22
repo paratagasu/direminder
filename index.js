@@ -935,9 +935,30 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
     await deleteCalendarEvent(newEvent.id, newEvent.name);
     delete db.data.activeVcSessions[newEvent.id];
     await db.write();
-    await scheduleEventReminders();
+    // キャンセルされたイベントのcronを削除して再登録
+    registeredEventIds.delete(newEvent.id);
+    for (const [desc, job] of [...jobMap.entries()]) {
+      if (desc.includes(`:${newEvent.id}:`) || desc.includes(`:${newEvent.id}`)) {
+        job.stop();
+        jobMap.delete(desc);
+        console.log(`🗑️ キャンセルによりcron削除: ${desc}`);
+      }
+    }
     return;
   }
+
+  // 時刻変更・名前変更など → cronを再登録
+  console.log(`✏️ イベント更新: "${newEvent.name}" → cronを再登録`);
+  // 古いcronを削除
+  for (const [desc, job] of [...jobMap.entries()]) {
+    if (desc.includes(`:${newEvent.id}:`) || desc.includes(`:${newEvent.id}`)) {
+      job.stop();
+      jobMap.delete(desc);
+    }
+  }
+  registeredEventIds.delete(newEvent.id);
+  // 新しい時刻でcronを再登録
+  await scheduleEventReminders();
 });
 
 client.on('guildScheduledEventDelete', async event => {
@@ -1502,7 +1523,6 @@ client.on('interactionCreate', async interaction => {
         pendingDeleteSessions: db.data.pendingDeleteSessions,
         saylaterJobs: db.data.saylaterJobs,
         gjData: db.data.gjData,
-        gjData: db.data.gjData,
       };
       const buf = Buffer.from(JSON.stringify(state, null, 2), 'utf-8');
       const filename = `bot-state-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
@@ -1532,14 +1552,8 @@ client.on('interactionCreate', async interaction => {
         if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
         if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
         // gjDataは完全に置き換え
-        if (json.gjData !== undefined) {
-          db.data.gjData = json.gjData;
-          initGjData(db);
-        } else {
-          // gjDataがない場合はリセット
-          db.data.gjData = { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
-        }
-        if (json.gjData)                         db.data.gjData                 = json.gjData;
+        db.data.gjData = json.gjData ?? { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
+        initGjData(db);
         await db.write();
         bootstrapSchedules();
         const exportedAt = new Date(json.exportedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
