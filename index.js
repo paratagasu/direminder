@@ -702,38 +702,41 @@ async function klipyFetch(endpoint) {
 
 function extractGifUrl(item) {
   if (!item) return null;
-  // 直接URLを持つ場合
-  if (typeof item.url === 'string' && item.url.includes('http')) return item.url;
-  // media がオブジェクト形式
-  if (item.media && !Array.isArray(item.media)) {
-    return item.media.gif?.url ?? item.media.tinygif?.url ?? item.media.mediumgif?.url
-        ?? item.media.nanogif?.url ?? null;
+  // Klipy形式: item.file.hd.gif.url
+  if (item.file) {
+    return item.file.hd?.gif?.url ?? item.file.hd?.webp?.url
+        ?? item.file.sd?.gif?.url ?? item.file.sd?.webp?.url ?? null;
   }
-  // media が配列形式（Tenor互換）
+  if (typeof item.url === 'string' && item.url.includes('http')) return item.url;
+  if (item.media && !Array.isArray(item.media)) {
+    return item.media.gif?.url ?? item.media.tinygif?.url ?? item.media.mediumgif?.url ?? null;
+  }
   if (Array.isArray(item.media) && item.media[0]) {
     const m = item.media[0];
-    return m.gif?.url ?? m.tinygif?.url ?? m.mediumgif?.url ?? m.nanogif?.url ?? null;
+    return m.gif?.url ?? m.tinygif?.url ?? m.mediumgif?.url ?? null;
   }
-  // その他のフィールドを探す
   return item.gif_url ?? item.images?.original?.url ?? null;
+}
+
+// Klipy APIレスポンスからアイテム配列を取得
+function extractKlipyItems(data) {
+  // Klipy形式: { result: true, data: { data: [...] } }
+  const inner = data?.data;
+  if (Array.isArray(inner?.data)) return inner.data;
+  if (Array.isArray(inner)) return inner;
+  if (Array.isArray(data?.results)) return data.results;
+  return [];
 }
 
 async function getRandomGif() {
   const randomWords = ['funny', 'happy', 'cool', 'wow', 'yes', 'ok', 'love', 'party', 'amazing', 'cute'];
-  const word = randomWords[Math.floor(Math.random() * randomWords.length)];
-  const data = await klipyFetch(`/gifs/search?q=${encodeURIComponent(word)}&limit=50`);
-  const items = data.data ?? data.results ?? data.gifs ?? [];
-  if (!Array.isArray(items) || items.length === 0) {
-    console.log('🎬 GIF response sample:', JSON.stringify(data).slice(0, 300));
-    throw new Error('GIFが取得できませんでした');
-  }
-  const item = items[Math.floor(Math.random() * items.length)];
-  console.log('🎬 GIF item sample:', JSON.stringify(item).slice(0, 200));
-  const url = extractGifUrl(item);
-  if (!url) {
-    console.log('🎬 extractGifUrl failed, item keys:', Object.keys(item).join(', '));
-    throw new Error('GIFのURLが取得できませんでした');
-  }
+  const word  = randomWords[Math.floor(Math.random() * randomWords.length)];
+  const data  = await klipyFetch(`/gifs/search?q=${encodeURIComponent(word)}&limit=50`);
+  const items = extractKlipyItems(data);
+  if (items.length === 0) throw new Error('GIFが取得できませんでした');
+  const item  = items[Math.floor(Math.random() * items.length)];
+  const url   = extractGifUrl(item);
+  if (!url) throw new Error('GIFのURLが取得できませんでした');
   return url;
 }
 
@@ -751,11 +754,13 @@ async function getKlipyCategories() {
 }
 
 async function getRandomGifByCategory(categoryName) {
-  const data = await klipyFetch(`/gifs/search?q=${encodeURIComponent(categoryName)}&limit=50`);
-  const items = data.data ?? data.results ?? [];
+  const data  = await klipyFetch(`/gifs/search?q=${encodeURIComponent(categoryName)}&limit=50`);
+  const items = extractKlipyItems(data);
   if (items.length === 0) throw new Error('GIFが取得できませんでした');
-  const item = items[Math.floor(Math.random() * items.length)];
-  return extractGifUrl(item);
+  const item  = items[Math.floor(Math.random() * items.length)];
+  const url   = extractGifUrl(item);
+  if (!url) throw new Error('GIFのURLが取得できませんでした');
+  return url;
 }
 
 // ============================================================
@@ -935,30 +940,9 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
     await deleteCalendarEvent(newEvent.id, newEvent.name);
     delete db.data.activeVcSessions[newEvent.id];
     await db.write();
-    // キャンセルされたイベントのcronを削除して再登録
-    registeredEventIds.delete(newEvent.id);
-    for (const [desc, job] of [...jobMap.entries()]) {
-      if (desc.includes(`:${newEvent.id}:`) || desc.includes(`:${newEvent.id}`)) {
-        job.stop();
-        jobMap.delete(desc);
-        console.log(`🗑️ キャンセルによりcron削除: ${desc}`);
-      }
-    }
+    await scheduleEventReminders();
     return;
   }
-
-  // 時刻変更・名前変更など → cronを再登録
-  console.log(`✏️ イベント更新: "${newEvent.name}" → cronを再登録`);
-  // 古いcronを削除
-  for (const [desc, job] of [...jobMap.entries()]) {
-    if (desc.includes(`:${newEvent.id}:`) || desc.includes(`:${newEvent.id}`)) {
-      job.stop();
-      jobMap.delete(desc);
-    }
-  }
-  registeredEventIds.delete(newEvent.id);
-  // 新しい時刻でcronを再登録
-  await scheduleEventReminders();
 });
 
 client.on('guildScheduledEventDelete', async event => {
@@ -1134,6 +1118,11 @@ client.once('ready', async () => {
 // ============================================================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
+  // インタラクションの有効期限チェック
+  if (interaction.createdTimestamp < Date.now() - 2500) {
+    console.log('⚠️ インタラクションの有効期限切れ、スキップ');
+    return;
+  }
 
   switch (interaction.commandName) {
     case 'ping': return interaction.reply('Pong!');
@@ -1523,6 +1512,7 @@ client.on('interactionCreate', async interaction => {
         pendingDeleteSessions: db.data.pendingDeleteSessions,
         saylaterJobs: db.data.saylaterJobs,
         gjData: db.data.gjData,
+        gjData: db.data.gjData,
       };
       const buf = Buffer.from(JSON.stringify(state, null, 2), 'utf-8');
       const filename = `bot-state-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
@@ -1552,8 +1542,14 @@ client.on('interactionCreate', async interaction => {
         if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
         if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
         // gjDataは完全に置き換え
-        db.data.gjData = json.gjData ?? { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
-        initGjData(db);
+        if (json.gjData !== undefined) {
+          db.data.gjData = json.gjData;
+          initGjData(db);
+        } else {
+          // gjDataがない場合はリセット
+          db.data.gjData = { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
+        }
+        if (json.gjData)                         db.data.gjData                 = json.gjData;
         await db.write();
         bootstrapSchedules();
         const exportedAt = new Date(json.exportedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
@@ -1781,6 +1777,21 @@ client.on('interactionCreate', async interaction => {
       });
     }
   }
+});
+
+// ============================================================
+// グローバルエラーハンドラー（Botのクラッシュを防ぐ）
+// ============================================================
+process.on('unhandledRejection', (error) => {
+  console.error('❌ Unhandled rejection:', error?.message ?? error);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught exception:', error?.message ?? error);
+});
+
+client.on('error', (error) => {
+  console.error('❌ Discord client error:', error?.message ?? error);
 });
 
 // ============================================================

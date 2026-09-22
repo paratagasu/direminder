@@ -122,6 +122,7 @@ export async function processGjChain(db, client, GUILD_ID, fromId, toId, channel
       cur.chain.push(toId);
       cur.lastAt = now;
       cur.lastChannelId = channelId;
+      await db.write(); // チェーン状態を永続化
       const hits = cur.chain.length;
       try {
         const ch    = await client.channels.fetch(channelId);
