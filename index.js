@@ -615,6 +615,48 @@ async function sendMorningSummary(withEveryone = true) {
 }
 
 // ============================================================
+// 出欠ロールの突き合わせ
+// ============================================================
+// 朝リマインドの✅リアクションと「参加予定_」ロールを一致させる。
+// Botが止まっていた間（リデプロイ中・インポート前）に付け外しされた✅を反映するため、
+// 起動時と /state-import の後に実行する。
+async function reconcileAttendanceRoles() {
+  const result = { added: 0, removed: 0, checked: 0 };
+  const msgIds = db.data.lastReminderMsgIds ?? [];
+  if (msgIds.length === 0) return result;
+  const guild   = await client.guilds.fetch(GUILD_ID);
+  const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
+  await guild.members.fetch().catch(() => {}); // role.members を正しくするため
+  for (const msgId of msgIds) {
+    const eventId = db.data.reminderMsgMap?.[msgId];
+    const roleId  = eventId && db.data.eventRoles[eventId];
+    if (!roleId) continue;
+    const role = await guild.roles.fetch(roleId).catch(() => null);
+    if (!role) continue;
+    const msg = await channel.messages.fetch(msgId).catch(() => null);
+    if (!msg) continue;
+    const reaction = msg.reactions.cache.find(r => r.emoji.name === '✅');
+    // ✅自体が取れない場合は誤ってロールを外さないよう何もしない
+    if (!reaction) continue;
+    const users = await reaction.users.fetch({ limit: 100 }).catch(() => null);
+    if (!users) continue;
+    const attending = new Set([...users.values()].filter(u => !u.bot).map(u => u.id));
+    for (const uid of attending) {
+      if (role.members.has(uid)) continue;
+      const member = await guild.members.fetch(uid).catch(() => null);
+      if (member && await member.roles.add(role).then(() => true).catch(() => false)) result.added++;
+    }
+    for (const member of [...role.members.values()]) {
+      if (attending.has(member.id)) continue;
+      if (await member.roles.remove(role).then(() => true).catch(() => false)) result.removed++;
+    }
+    result.checked++;
+  }
+  console.log(`🔁 出欠ロール突き合わせ: ${result.checked}件確認 / 付与 ${result.added} / 解除 ${result.removed}`);
+  return result;
+}
+
+// ============================================================
 // イベントcron登録（重複防止付き）
 // ============================================================
 // イベント用cronのキーは `event:<イベントID>:<種類>`。
@@ -1065,6 +1107,8 @@ client.once(Events.ClientReady, async () => {
 
   // コマンド登録に失敗してもリマインド等は動くように、先にスケジュールを起動する
   bootstrapSchedules();
+  // 停止中に付け外しされた✅を反映
+  reconcileAttendanceRoles().catch(e => console.error('出欠ロール突き合わせ失敗:', e.message));
 
   // GIFカテゴリを取得してコマンドのchoicesに使う
   let gifCategories = [];
@@ -1718,6 +1762,8 @@ async function handleCommand(interaction) {
         }
         await db.write();
         bootstrapSchedules();
+        // インポート前・停止中に付け外しされた✅を反映
+        const rec = await reconcileAttendanceRoles().catch(e => { console.error('出欠ロール突き合わせ失敗:', e.message); return null; });
         const exportedAt = new Date(json.exportedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
         return interaction.editReply(
           `✅ 状態をインポートしました\n　エクスポート日時: ${exportedAt}\n` +
@@ -1726,7 +1772,8 @@ async function handleCommand(interaction) {
           `　リマインドメッセージ: ${(json.lastReminderMsgIds ?? []).length}件\n` +
           `　除外ユーザー: ${(json.vcExcludeUsers ?? []).length}名\n` +
           `　GJ履歴: ${(json.gjData?.history ?? []).length}件\n` +
-          `　伝言予約: ${Object.keys(json.saylaterJobs ?? {}).length}件\n\n` +
+          `　伝言予約: ${Object.keys(json.saylaterJobs ?? {}).length}件\n` +
+          (rec ? `　出欠ロール反映: 付与 ${rec.added}名 / 解除 ${rec.removed}名\n\n` : `　⚠️ 出欠ロールの反映に失敗しました（ログを確認してください）\n\n`) +
           `cronを再登録しました。リマインド収集はそのまま継続されます。`
         );
       } catch (e) { return interaction.editReply(`❌ インポート失敗: ${e.message}`); }
