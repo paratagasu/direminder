@@ -1,5 +1,5 @@
 // index.js
-// Version: 2.27.18
+// Version: 2.34.0
 
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
@@ -8,7 +8,7 @@ import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import { google } from 'googleapis';
 import {
-  Client, IntentsBitField, REST, Routes,
+  Client, IntentsBitField, REST, Routes, Partials, Events,
   SlashCommandBuilder, AttachmentBuilder, ChannelType
 } from 'discord.js';
 import {
@@ -17,7 +17,7 @@ import {
 import * as dotenv from 'dotenv';
 import {
   GOOD_JOB_EMOJI_ID, GOOD_JOB_EMOJI_NAME, GJ_ANNOUNCE_CHANNEL,
-  initGjData, getGjPoints, getDailySentCount,
+  initGjData, getGjPoints, getDailySentCount, ensureMonthlyCounter,
   sendGoodJob, checkAchievements, sendMonthlyAwards,
 } from './gj.js';
 dotenv.config();
@@ -32,6 +32,7 @@ const {
 } = process.env;
 const PORT = process.env.PORT ?? 3000;
 const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
+const BOT_VERSION = '2.34.0';
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ 必要な環境変数が不足しています');
@@ -88,6 +89,63 @@ if (GOOGLE_SERVICE_ACCOUNT_KEY && GOOGLE_CALENDAR_ID) {
   } catch (e) {
     console.error('⚠️ Google Calendar 初期化失敗:', e.message);
   }
+}
+
+// ============================================================
+// 日時ヘルパー（サーバーのタイムゾーンに依存しないようJSTを明示的に扱う）
+// ============================================================
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+// JSTの年月日時分 → Date
+function jstDate(year, month, day, hour = 0, minute = 0) {
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, 0) - JST_OFFSET_MS);
+}
+
+// 現在のJST年月日
+function nowJstParts() {
+  const j = new Date(Date.now() + JST_OFFSET_MS);
+  return { year: j.getUTCFullYear(), month: j.getUTCMonth() + 1, day: j.getUTCDate() };
+}
+
+// 存在する日付か（2/31 などを弾く）
+function isValidDate(year, month, day) {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+// 月日だけ指定された日付の年を決める（今日より前なら来年扱い）
+function resolveYear(month, day) {
+  const n = nowJstParts();
+  const today = Date.UTC(n.year, n.month - 1, n.day);
+  return Date.UTC(n.year, month - 1, day) < today ? n.year + 1 : n.year;
+}
+
+// "HH:MM" → [h, m]（不正なら null）
+function parseHHMM(str) {
+  const m = /^(\d{1,2})[:：](\d{2})$/.exec((str ?? '').trim());
+  if (!m) return null;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return [h, min];
+}
+
+// 指定日時に1回だけ発火するcron式（JST）
+function cronExprAt(date) {
+  const jst = new Date(date.getTime() + JST_OFFSET_MS);
+  return `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
+}
+
+// 2000文字を超えるメッセージを分割して返信
+async function replyLong(interaction, text) {
+  const chunks = [];
+  let buf = '';
+  for (const line of text.split('\n')) {
+    if (buf.length + line.length + 1 > 1900) { chunks.push(buf); buf = ''; }
+    buf += (buf ? '\n' : '') + line;
+  }
+  if (buf) chunks.push(buf);
+  await interaction.editReply(chunks[0] || '（なし）');
+  for (const c of chunks.slice(1)) await interaction.followUp(c);
 }
 
 // ============================================================
@@ -187,8 +245,12 @@ async function findCalendarEventByDiscordId(discordEventId) {
   }
 }
 
+let calendarSyncRunning = false;
 async function syncAllEventsToCalendar() {
   if (!calendarEnabled) return;
+  // 同期の多重実行で同じ予定が二重登録されるのを防ぐ
+  if (calendarSyncRunning) return;
+  calendarSyncRunning = true;
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
     const all = await guild.scheduledEvents.fetch();
@@ -246,6 +308,8 @@ async function syncAllEventsToCalendar() {
     console.log(`🔄 Googleカレンダー同期完了 (${new Date().toLocaleString('ja-JP')})`);
   } catch (e) {
     console.error('❌ Googleカレンダー同期失敗:', e.message);
+  } finally {
+    calendarSyncRunning = false;
   }
 }
 
@@ -301,7 +365,7 @@ async function writeParticipantsToCalendar(eventId, eventName) {
 // ============================================================
 async function queryMemberCalendars(target, targetHour) {
   if (!calendarEnabled) return [];
-  const windowStart = new Date(Date.UTC(target.year, target.month - 1, target.day, targetHour - 9, 0, 0, 0));
+  const windowStart = jstDate(target.year, target.month, target.day, targetHour, 0);
   const windowEnd   = new Date(windowStart.getTime() + 60 * 60 * 1000);
   const results = [];
   for (const [name, calId] of Object.entries(MEMBER_CALENDARS)) {
@@ -351,18 +415,20 @@ async function startVcSession(event) {
     const guild = await client.guilds.fetch(GUILD_ID);
     const channel = await guild.channels.fetch(event.channelId);
     if (!channel?.isVoiceBased()) return;
-    joinVoiceChannel({
-      channelId: channel.id,
-      guildId: GUILD_ID,
-      adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: true,
-      selfMute: true,
-    });
-    await channel.fetch();
+    // 参加者記録はVC接続の成否に関係なく先に開始する（記録はvoiceStateUpdateで行うため接続は必須ではない）
     const initialMembers = [...channel.members.keys()].filter(id => id !== client.user.id);
     db.data.activeVcSessions[event.id] = { channelId: event.channelId, participants: initialMembers };
     await db.write();
     console.log(`🎙️ VCセッション開始: "${event.name}" (初期: ${initialMembers.length}名)`);
+    try {
+      joinVoiceChannel({
+        channelId: channel.id,
+        guildId: GUILD_ID,
+        adapterCreator: guild.voiceAdapterCreator,
+        selfDeaf: true,
+        selfMute: true,
+      });
+    } catch (e) { console.error(`⚠️ VC接続失敗（参加者記録は継続）:`, e.message); }
   } catch (e) { console.error(`❌ VCセッション開始失敗:`, e.message); }
 }
 
@@ -372,7 +438,7 @@ async function endVcSession(eventId, eventName) {
 
     // 会議参加者にBotからGJを送信
     const session = db.data.activeVcSessions[eventId];
-    if (session && session.participants.length > 0) {
+    if (session && session.participants?.length > 0) {
       const guild = await client.guilds.fetch(GUILD_ID);
       // 参加予定者ロールが設定されていればロール持ちのみ、なければ全員
       const roleId = db.data.eventRoles[eventId];
@@ -393,8 +459,7 @@ async function endVcSession(eventId, eventName) {
             // BotからのGJ（GJPのみ付与、GSPなし）
             const toPoints = getGjPoints(db, uid);
             toPoints.gjp++;
-            db.data.gjData.monthlyCounters[uid] ??= { gjCounterCount: 0, monthlyGjp: 0, monthlyGsp: 0, uniqueSenders: [] };
-            db.data.gjData.monthlyCounters[uid].monthlyGjp++;
+            ensureMonthlyCounter(db, uid).monthlyGjp++;
             db.data.gjData.history.push({
               from: client.user.id, to: uid, reason: 'ナイス会議参加!!!',
               anonymous: false, channelId: ANNOUNCE_CHANNEL_ID, timestamp: new Date().toISOString()
@@ -463,19 +528,32 @@ async function stripAllEventRoles(guild) {
 // ============================================================
 // cron 管理
 // ============================================================
+// desc → { task, expr, fn }
 const jobMap = new Map();
 
-function registerCron(expr, jobFn, desc) {
-  if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
-  console.log(`⏰ Register cron [${expr}] for ${desc}`);
-  const job = cron.schedule(expr, async () => {
-    console.log(`▶ Trigger [${desc}] at ${new Date().toLocaleString('ja-JP')}`);
-    try { await jobFn(); } catch (e) { console.error(`❌ Job error (${desc}):`, e); }
-  }, { timezone: 'Asia/Tokyo' });
-  jobMap.set(desc, job);
+function stopJob(desc) {
+  const entry = jobMap.get(desc);
+  if (!entry) return;
+  entry.task.stop();
+  entry.task.destroy?.();
+  jobMap.delete(desc);
 }
 
-function clearAllJobs() { for (const j of jobMap.values()) j.stop(); jobMap.clear(); }
+function registerCron(expr, jobFn, desc) {
+  const current = jobMap.get(desc);
+  // 同じ時刻で登録済みなら作り直さない（作り直しの瞬間に発火を取りこぼすのを防ぐ）
+  if (current && current.expr === expr) { current.fn = jobFn; return; }
+  if (current) stopJob(desc);
+  console.log(`⏰ Register cron [${expr}] for ${desc}`);
+  const entry = { expr, fn: jobFn, task: null };
+  entry.task = cron.schedule(expr, async () => {
+    console.log(`▶ Trigger [${desc}] at ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
+    try { await entry.fn(); } catch (e) { console.error(`❌ Job error (${desc}):`, e); }
+  }, { timezone: 'Asia/Tokyo' });
+  jobMap.set(desc, entry);
+}
+
+function clearAllJobs() { for (const desc of [...jobMap.keys()]) stopJob(desc); }
 
 // ============================================================
 // イベント取得
@@ -497,6 +575,12 @@ async function fetchWeekEvents(guild) {
   return all.filter(e => { const s = new Date(e.scheduledStartTimestamp); return s >= now && s <= weekLater; });
 }
 
+// VC/ステージのイベントはチャンネルリンク、外部イベントは場所を表示
+function eventPlace(e) {
+  if (e.channelId) return `<https://discord.com/channels/${GUILD_ID}/${e.channelId}>`;
+  return e.entityMetadata?.location || '（未設定）';
+}
+
 // ============================================================
 // 朝リマインド
 // ============================================================
@@ -516,9 +600,9 @@ async function sendMorningSummary(withEveryone = true) {
     const role     = await getOrCreateEventRole(guild, e);
     const time     = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo' });
     const host     = e.creator?.username || '不明';
-    const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+    const chanUrl  = eventPlace(e);
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-    const msg = `## ◆${e.name}\n${time} / ${host}\n📍 チャンネル: <${chanUrl}>\n🔗 イベント:   <${eventUrl}>\n✅ 出席／❌ 欠席 で参加表明お願いします！`;
+    const msg = `## ◆${e.name}\n${time} / ${host}\n📍 チャンネル: ${chanUrl}\n🔗 イベント:   <${eventUrl}>\n✅ 出席／❌ 欠席 で参加表明お願いします！`;
     const sent = await channel.send({ content: msg, allowedMentions: { roles: [role.id] } });
     await sent.react('✅');
     await sent.react('❌');
@@ -533,72 +617,60 @@ async function sendMorningSummary(withEveryone = true) {
 // ============================================================
 // イベントcron登録（重複防止付き）
 // ============================================================
-// 現在登録中のイベントIDセットを管理
-const registeredEventIds = new Set();
+// イベント用cronのキーは `event:<イベントID>:<種類>`。
+// 毎回「今あるべきcron」の集合を作り、それ以外の event: cron を止める。
+// これでキャンセル・削除・時刻変更・同名イベントにも正しく追従する。
+const EVENT_JOB_PREFIX = 'event:';
+const PAST_GRACE_MS = 60 * 1000;
 
 async function scheduleEventReminders() {
   const guild  = await client.guilds.fetch(GUILD_ID);
   const events = await fetchTodaysEvents(guild);
+  const wanted = new Set();
+  const now = Date.now();
 
-  // 今日のイベントIDセット
-  const todayEventIds = new Set([...events.values()].map(e => e.id));
-
-  // 削除・キャンセルされたイベントのcronを停止
-  for (const eventId of [...registeredEventIds]) {
-    if (!todayEventIds.has(eventId)) {
-      // このイベントIDに関連するcronを全て停止
-      for (const [desc, job] of [...jobMap.entries()]) {
-        if (desc.includes(`:${eventId}:`) || desc.includes(`:${eventId}`)) {
-          job.stop();
-          jobMap.delete(desc);
-          console.log(`🗑️ cronを削除: ${desc}`);
-        }
-      }
-      registeredEventIds.delete(eventId);
-    }
-  }
+  // 過去の時刻は登録しない（日付指定のcronは翌年に発火してしまうため）
+  const registerEventCron = (at, fn, desc) => {
+    if (at.getTime() < now - PAST_GRACE_MS) return;
+    wanted.add(desc);
+    registerCron(cronExprAt(at), fn, desc);
+  };
 
   for (const offset of (db.data.reminderOffsets ?? [60, 15])) {
     for (const e of events.values()) {
+      if (e.status !== 1) continue; // 予定(SCHEDULED)のみ
       const target = new Date(e.scheduledStartTimestamp - offset * 60000);
-      const jst    = new Date(target.getTime() + 9 * 60 * 60 * 1000);
-      const expr   = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
-      const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+      const chanUrl  = eventPlace(e);
       const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
-      registerCron(expr, async () => {
+      registerEventCron(target, async () => {
         const g    = await client.guilds.fetch(GUILD_ID);
         // イベントがまだ存在するか確認
         const currentEvents = await g.scheduledEvents.fetch();
         if (!currentEvents.has(e.id)) return;
         const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
         const role = await getOrCreateEventRole(g, e);
-        await ch.send({ content: `${role}\n⏰ **${offset}分前リマインド** 「${e.name}」\n📍 チャンネル: <${chanUrl}>\n🔗 イベント:   <${eventUrl}>`, allowedMentions: { roles: [role.id] } });
-      }, `reminder '${e.name}' -${offset}m`);
-      registeredEventIds.add(e.id);
+        await ch.send({ content: `${role}\n⏰ **${offset}分前リマインド** 「${e.name}」\n📍 チャンネル: ${chanUrl}\n🔗 イベント:   <${eventUrl}>`, allowedMentions: { roles: [role.id] } });
+      }, `${EVENT_JOB_PREFIX}${e.id}:reminder:${offset}`);
     }
   }
 
   for (const e of events.values()) {
+    if (e.status !== 1 && e.status !== 2) continue; // 予定 or 開催中のみ
     const startTs  = e.scheduledStartTimestamp;
-    const startJst = new Date(new Date(startTs).getTime() + 9 * 60 * 60 * 1000);
-    const expr     = `${startJst.getUTCMinutes()} ${startJst.getUTCHours()} ${startJst.getUTCDate()} ${startJst.getUTCMonth() + 1} *`;
-    const chanUrl  = `https://discord.com/channels/${GUILD_ID}/${e.channelId}`;
+    const chanUrl  = eventPlace(e);
     const eventUrl = `https://discord.com/events/${GUILD_ID}/${e.id}`;
 
     // 開始アナウンス
-    registerCron(expr, async () => {
+    registerEventCron(new Date(startTs), async () => {
       const g = await client.guilds.fetch(GUILD_ID);
       const currentEvents = await g.scheduledEvents.fetch();
       if (!currentEvents.has(e.id)) return;
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
-      await ch.send({ content: `@everyone\n🚀 **「${e.name}」が始まりました！**\n📍 会場: <${chanUrl}>\n🔗 イベント: <${eventUrl}>`, allowedMentions: { parse: ['everyone'] } });
-    }, `start '${e.name}'`);
+      await ch.send({ content: `@everyone\n🚀 **「${e.name}」が始まりました！**\n📍 会場: ${chanUrl}\n🔗 イベント: <${eventUrl}>`, allowedMentions: { parse: ['everyone'] } });
+    }, `${EVENT_JOB_PREFIX}${e.id}:start`);
 
     // 開始3分後：未参加チェック
-    const check3  = new Date(startTs + 3 * 60000);
-    const jst3    = new Date(check3.getTime() + 9 * 60 * 60 * 1000);
-    const expr3   = `${jst3.getUTCMinutes()} ${jst3.getUTCHours()} ${jst3.getUTCDate()} ${jst3.getUTCMonth() + 1} *`;
-    registerCron(expr3, async () => {
+    registerEventCron(new Date(startTs + 3 * 60000), async () => {
       const g = await client.guilds.fetch(GUILD_ID);
       const currentEvents = await g.scheduledEvents.fetch();
       if (!currentEvents.has(e.id)) return;
@@ -606,27 +678,32 @@ async function scheduleEventReminders() {
       const role = await getOrCreateEventRole(g, e);
       const vcCh = e.channelId ? await g.channels.fetch(e.channelId).catch(() => null) : null;
       if (!vcCh) return;
+      // role.members はキャッシュ依存なのでメンバーを取得しておく
+      await g.members.fetch().catch(() => {});
       const vcIds    = new Set(vcCh.members?.keys() ?? []);
       const absentees = role.members.filter(m => !vcIds.has(m.id));
       if (absentees.size === 0) return;
       await ch.send({ content: `⚠️ 以下の出席予定者が参加していません:\n${absentees.map(m => `<@${m.id}>`).join('\n')}`, allowedMentions: { users: [...absentees.keys()] } });
-    }, `absence '${e.name}' +3m`);
+    }, `${EVENT_JOB_PREFIX}${e.id}:absence`);
 
     // 開始5分後：まだ開始していなければ通知
-    const check5  = new Date(startTs + 5 * 60000);
-    const jst5    = new Date(check5.getTime() + 9 * 60 * 60 * 1000);
-    const expr5   = `${jst5.getUTCMinutes()} ${jst5.getUTCHours()} ${jst5.getUTCDate()} ${jst5.getUTCMonth() + 1} *`;
-    registerCron(expr5, async () => {
+    registerEventCron(new Date(startTs + 5 * 60000), async () => {
       const g = await client.guilds.fetch(GUILD_ID);
       const currentEvents = await g.scheduledEvents.fetch();
       const currentEvent  = currentEvents.get(e.id);
-      // ACTIVE(2) でも COMPLETED(3) でもなければ未開始
-      if (!currentEvent || currentEvent.status === 2 || currentEvent.status === 3) return;
+      // 予定(SCHEDULED=1)のままなら未開始。開催中・完了・キャンセルなら何もしない
+      if (!currentEvent || currentEvent.status !== 1) return;
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       await ch.send({ content: `⚠️ 「${e.name}」はまだ開始されていません` });
-    }, `not-started '${e.name}' +5m`);
+    }, `${EVENT_JOB_PREFIX}${e.id}:not-started`);
+  }
 
-    registeredEventIds.add(e.id);
+  // 不要になったイベントcron（キャンセル・削除・時刻変更前・過去分・削除したオフセット）を停止
+  for (const desc of [...jobMap.keys()]) {
+    if (desc.startsWith(EVENT_JOB_PREFIX) && !wanted.has(desc)) {
+      stopJob(desc);
+      console.log(`🗑️ cronを削除: ${desc}`);
+    }
   }
 }
 
@@ -638,9 +715,8 @@ function scheduleDailyReminders() {
 
 function bootstrapSchedules() {
   clearAllJobs();
-  registeredEventIds.clear();
   scheduleDailyReminders();
-  scheduleEventReminders();
+  scheduleEventReminders().catch(e => console.error('イベントcron登録エラー:', e.message));
   // 3分おきにCalendar同期
   registerCron('*/3 * * * *', syncAllEventsToCalendar, 'calendar-sync');
   // 1分おきにイベント状態を再確認してcronを更新
@@ -656,33 +732,36 @@ function bootstrapSchedules() {
   }, 'monthly-awards');
 }
 
+async function sendSaylater(job) {
+  const ch = await client.channels.fetch(job.channelId);
+  await ch.send(`<@${job.mentionId}>\n${job.message}`);
+}
+
+// 伝言予約1件をcronに登録（新規作成・復元の共通処理）
+function scheduleSaylaterJob(id) {
+  const job = db.data.saylaterJobs[id];
+  if (!job) return;
+  const desc = `simple-remind:${id}`;
+  registerCron(cronExprAt(new Date(job.fireAt)), async () => {
+    try { await sendSaylater(job); }
+    catch (e) { console.error('❌ 伝言予約送信失敗:', e.message); }
+    delete db.data.saylaterJobs[id];
+    await db.write();
+    stopJob(desc);
+  }, desc);
+}
+
 function restoreSaylaterJobs() {
   const now = Date.now();
   for (const [id, job] of Object.entries(db.data.saylaterJobs ?? {})) {
-    const fireAt = new Date(job.fireAt);
-    if (fireAt <= now) {
-      // 過去の発火予定は即時送信
-      client.channels.fetch(job.channelId).then(ch => {
-        ch.send(`<@${job.mentionId}>
-${job.message}`).catch(() => {});
-      }).catch(() => {});
+    if (new Date(job.fireAt).getTime() <= now) {
+      // 停止中に過ぎた予約は即時送信
+      sendSaylater(job).catch(e => console.error('❌ 伝言予約送信失敗:', e.message));
       delete db.data.saylaterJobs[id];
       db.write().catch(() => {});
       continue;
     }
-    const jst  = new Date(fireAt.getTime() + 9 * 60 * 60 * 1000);
-    const expr = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
-    const desc = `simple-remind:${id}`;
-    registerCron(expr, async () => {
-      try {
-        const ch = await client.channels.fetch(job.channelId);
-        await ch.send(`<@${job.mentionId}>
-${job.message}`);
-      } catch (e) { console.error('❌ 伝言予約送信失敗:', e.message); }
-      delete db.data.saylaterJobs[id];
-      await db.write();
-      if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
-    }, desc);
+    scheduleSaylaterJob(id);
     console.log(`📬 伝言予約復元: ${new Date(job.fireAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })} "${job.message.slice(0, 20)}"`);
   }
 }
@@ -801,13 +880,19 @@ const client = new Client({
     IntentsBitField.Flags.GuildScheduledEvents,
     IntentsBitField.Flags.GuildVoiceStates,
     IntentsBitField.Flags.MessageContent,
-  ]
+  ],
+  // Bot起動前のメッセージ（朝リマインド等）へのリアクションも受け取るために必要
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User, Partials.GuildMember],
 });
 
 // ============================================================
 // リアクション処理
 // ============================================================
 async function handleReaction(reaction, user, add) {
+  // partial（キャッシュにない古いメッセージ）の場合は取得し直す
+  if (reaction.partial) await reaction.fetch().catch(() => {});
+  if (reaction.message.partial) await reaction.message.fetch().catch(() => {});
+  if (user.partial) user = await user.fetch().catch(() => user);
   if (user.bot) return;
 
   // GOOD_JOBリアクション処理
@@ -817,7 +902,7 @@ async function handleReaction(reaction, user, add) {
       const toId     = reaction.message.author?.id;
       if (toId && fromId !== toId && !reaction.message.author?.bot) {
         try {
-          const guild   = reaction.message.guild;
+          const guild   = await client.guilds.fetch(GUILD_ID);
           const fromMember = await guild.members.fetch(fromId).catch(() => null);
           const toMember   = await guild.members.fetch(toId).catch(() => null);
           if (fromMember && toMember) {
@@ -832,7 +917,9 @@ async function handleReaction(reaction, user, add) {
               reason: null, anonymous: false, channel: ch
             });
             if (!result.success) {
-              await ch.send({ content: result.reason, flags: 64 }).catch(() => {});
+              // 通常メッセージには「自分だけに表示」が使えないので、少し後に消す
+              const notice = await ch.send({ content: `<@${fromId}> ${result.reason}`, allowedMentions: { users: [fromId] } }).catch(() => null);
+              if (notice) setTimeout(() => notice.delete().catch(() => {}), 10000);
             }
           }
         } catch (e) { console.error('GJリアクション処理失敗:', e.message); }
@@ -847,7 +934,7 @@ async function handleReaction(reaction, user, add) {
     if (db.data.lastReminderMsgIds?.includes(msgId)) {
       const eventId = db.data.reminderMsgMap?.[msgId];
       if (!eventId) return;
-      const guild  = reaction.message.guild;
+      const guild  = await client.guilds.fetch(GUILD_ID);
       const member = await guild.members.fetch(user.id).catch(() => null);
       if (!member) return;
       const roleId = db.data.eventRoles[eventId];
@@ -866,6 +953,7 @@ async function handleReaction(reaction, user, add) {
   if (!session || reaction.message.id !== session.msgId) return;
   if (user.id !== session.requesterId) return; // 本人以外は無視
 
+  if (!add) return; // 削除選択はリアクションを付けたときだけ反応する
   const emojiName = reaction.emoji.name;
 
   // キャンセル
@@ -883,6 +971,7 @@ async function handleReaction(reaction, user, add) {
 
   const targetEvent = session.events[idx];
   try {
+    if (!calendarEnabled) throw new Error('Calendar未設定');
     await calendar.events.delete({ calendarId: session.calendarId, eventId: targetEvent.id });
     delete db.data.pendingDeleteSessions[user.id];
     await db.write();
@@ -893,13 +982,13 @@ async function handleReaction(reaction, user, add) {
   }
 }
 
-client.on('messageReactionAdd',    (r, u) => handleReaction(r, u, true));
-client.on('messageReactionRemove', (r, u) => handleReaction(r, u, false));
+client.on(Events.MessageReactionAdd,    (r, u) => handleReaction(r, u, true).catch(e => console.error('リアクション処理エラー:', e.message)));
+client.on(Events.MessageReactionRemove, (r, u) => handleReaction(r, u, false).catch(e => console.error('リアクション処理エラー:', e.message)));
 
 // ============================================================
 // VC入室監視
 // ============================================================
-client.on('voiceStateUpdate', async (oldState, newState) => {
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   if (newState.guild.id !== GUILD_ID) return;
   const userId = newState.id;
   if (userId === client.user.id) return;
@@ -918,21 +1007,23 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // ============================================================
 // Discordイベント検知
 // ============================================================
-client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
+client.on(Events.GuildScheduledEventUpdate, async (oldEvent, newEvent) => {
   if (newEvent.guildId !== GUILD_ID) return;
 
   // ACTIVE（開始）
-  if (newEvent.status === 2 && oldEvent.status !== 2) {
+  if (newEvent.status === 2 && oldEvent?.status !== 2) {
     console.log(`▶ イベント開始: "${newEvent.name}"`);
     await startVcSession(newEvent);
+    await scheduleEventReminders();
     return;
   }
   // 完了
-  if (newEvent.status === 3 && oldEvent.status !== 3) {
+  if (newEvent.status === 3 && oldEvent?.status !== 3) {
     console.log(`⏹ イベント完了: "${newEvent.name}"`);
     await endVcSession(newEvent.id, newEvent.name);
     const guild = await client.guilds.fetch(GUILD_ID);
     await deleteEventRole(guild, newEvent.id, newEvent.name);
+    await scheduleEventReminders();
     return;
   }
   // キャンセル
@@ -945,9 +1036,16 @@ client.on('guildScheduledEventUpdate', async (oldEvent, newEvent) => {
     await scheduleEventReminders();
     return;
   }
+  // 時刻・名前などの変更 → cronを即座に更新
+  await scheduleEventReminders();
 });
 
-client.on('guildScheduledEventDelete', async event => {
+client.on(Events.GuildScheduledEventCreate, async event => {
+  if (event.guildId !== GUILD_ID) return;
+  await scheduleEventReminders();
+});
+
+client.on(Events.GuildScheduledEventDelete, async event => {
   if (event.guildId !== GUILD_ID) return;
   const guild = await client.guilds.fetch(GUILD_ID);
   await deleteEventRole(guild, event.id, event.name);
@@ -960,10 +1058,13 @@ client.on('guildScheduledEventDelete', async event => {
 // ============================================================
 // コマンド登録 & Bot起動
 // ============================================================
-client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+client.once(Events.ClientReady, async () => {
+  console.log(`✅ Logged in as ${client.user.tag} (v${BOT_VERSION})`);
   console.log(`   → morningTime = ${db.data.morningTime}`);
   console.log(`   → offsets     = ${db.data.reminderOffsets.join(',')}`);
+
+  // コマンド登録に失敗してもリマインド等は動くように、先にスケジュールを起動する
+  bootstrapSchedules();
 
   // GIFカテゴリを取得してコマンドのchoicesに使う
   let gifCategories = [];
@@ -977,10 +1078,13 @@ client.once('ready', async () => {
 
   const safeCats = Array.isArray(gifCategories) ? gifCategories : [];
   console.log(`🎬 Klipyカテゴリ取得: ${safeCats.length}件`);
+  // Discordのchoicesは name/value とも1〜100文字・value重複不可
+  const seenValues = new Set();
   const gifCategoryChoices = safeCats
-    .slice(0, 25)
-    .map(c => ({ name: c.name ?? c.slug ?? String(c), value: c.slug ?? c.name ?? String(c) }))
-    .filter(c => c.name && c.value);
+    .map(c => (typeof c === 'string' ? { name: c, value: c } : { name: c?.name ?? c?.slug, value: c?.slug ?? c?.name }))
+    .map(c => ({ name: String(c.name ?? '').slice(0, 100), value: String(c.value ?? '').slice(0, 100) }))
+    .filter(c => c.name && c.value && !seenValues.has(c.value) && seenValues.add(c.value))
+    .slice(0, 25);
 
   // カテゴリが取れなかった場合はフォールバック
   const fallbackCategories = [
@@ -1131,29 +1235,45 @@ client.once('ready', async () => {
         )),
   ].map(c => c.toJSON());
 
-  await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
-    .put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
-  console.log('✅ Slash commands registered');
-
-  bootstrapSchedules();
+  try {
+    await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
+      .put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
+    console.log('✅ Slash commands registered');
+  } catch (e) {
+    console.error('❌ スラッシュコマンド登録失敗:', e);
+  }
 });
 
 // ============================================================
 // コマンドハンドラ
 // ============================================================
-client.on('interactionCreate', async interaction => {
+client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  // インタラクションの有効期限チェック
-  if (interaction.createdTimestamp < Date.now() - 2500) {
-    console.log('⚠️ インタラクションの有効期限切れ、スキップ');
-    return;
+  try {
+    await handleCommand(interaction);
+  } catch (e) {
+    // 10062 = Unknown interaction（3秒以内に応答できなかった）
+    if (e?.code === 10062) {
+      console.warn(`⚠️ インタラクション期限切れ: /${interaction.commandName}`);
+      return;
+    }
+    console.error(`❌ コマンドエラー (/${interaction.commandName}):`, e);
+    const content = `❌ エラーが発生しました: ${e?.message ?? e}`;
+    try {
+      if (interaction.deferred || interaction.replied) await interaction.followUp({ content, flags: 64 });
+      else await interaction.reply({ content, flags: 64 });
+    } catch {}
   }
+});
 
+async function handleCommand(interaction) {
   switch (interaction.commandName) {
     case 'ping': return interaction.reply('Pong!');
 
     case 'set-morning-time': {
-      const time = interaction.options.getString('time');
+      const parsed = parseHHMM(interaction.options.getString('time'));
+      if (!parsed) return interaction.reply({ content: '❌ 時刻は HH:MM 形式（例: 07:00）で指定してください', flags: 64 });
+      const time = `${String(parsed[0]).padStart(2, '0')}:${String(parsed[1]).padStart(2, '0')}`;
       db.data.morningTime = time;
       await db.write();
       bootstrapSchedules();
@@ -1191,15 +1311,17 @@ client.on('interactionCreate', async interaction => {
     }
 
     case 'week-events': {
+      await interaction.deferReply();
       const guild  = await client.guilds.fetch(GUILD_ID);
       const events = await fetchWeekEvents(guild);
-      if (events.size === 0) return interaction.reply('📭 今後1週間のイベントはありません');
+      if (events.size === 0) return interaction.editReply('📭 今後1週間のイベントはありません');
       let msg = '📆 今後1週間のイベント一覧:\n';
-      for (const e of events.values()) {
+      const sorted = [...events.values()].sort((a, b) => a.scheduledStartTimestamp - b.scheduledStartTimestamp);
+      for (const e of sorted) {
         const ts = new Date(e.scheduledStartTimestamp).toLocaleString('ja-JP', { weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
         msg += `• ${e.name} / ${ts}\n`;
       }
-      return interaction.reply(msg);
+      return replyLong(interaction, msg);
     }
 
     case 'sync-calendar': {
@@ -1224,10 +1346,13 @@ client.on('interactionCreate', async interaction => {
     case 'connection-change': {
       const isAdmin = interaction.member?.permissions?.has?.('Administrator') ?? false;
       if (!isAdmin) return interaction.reply({ content: '⛔ 権限がありません', flags: 64 });
-      const ch   = await client.channels.fetch(interaction.options.getChannel('channel').id);
+      await interaction.deferReply({ flags: 64 });
       const text = interaction.options.getString('serial-number');
-      try { await ch.send(text); return interaction.reply({ content: '✅ 接続設定を変更しました', flags: 64 }); }
-      catch (e) { return interaction.reply({ content: `❌ 失敗: ${e.message}`, flags: 64 }); }
+      try {
+        const ch = await client.channels.fetch(interaction.options.getChannel('channel').id);
+        await ch.send(text);
+        return interaction.editReply('✅ 接続設定を変更しました');
+      } catch (e) { return interaction.editReply(`❌ 失敗: ${e.message}`); }
     }
 
     case 'random-katakana': {
@@ -1277,13 +1402,14 @@ client.on('interactionCreate', async interaction => {
     case 'exclude-user-list': {
       const ids = db.data.vcExcludeUsers ?? [];
       if (ids.length === 0) return interaction.reply('📭 除外リストは空です');
+      await interaction.deferReply();
       const guild = await client.guilds.fetch(GUILD_ID);
       const names = [];
       for (const id of ids) {
         const m = await guild.members.fetch(id).catch(() => null);
         names.push(m ? `・${m.displayName} (${id})` : `・不明 (${id})`);
       }
-      return interaction.reply(`📋 除外ユーザー一覧 (${ids.length}名):\n${names.join('\n')}`);
+      return replyLong(interaction, `📋 除外ユーザー一覧 (${ids.length}名):\n${names.join('\n')}`);
     }
 
     case 'exclude-user-export': {
@@ -1293,23 +1419,27 @@ client.on('interactionCreate', async interaction => {
 
     case 'exclude-user-import': {
       const att = interaction.options.getAttachment('file');
+      await interaction.deferReply();
       try {
         const json = await (await fetch(att.url)).json();
-        if (!Array.isArray(json.vcExcludeUsers)) return interaction.reply({ content: '❌ 形式が正しくありません', flags: 64 });
+        if (!Array.isArray(json.vcExcludeUsers)) return interaction.editReply('❌ 形式が正しくありません');
         db.data.vcExcludeUsers = json.vcExcludeUsers;
         await db.write();
-        return interaction.reply(`✅ インポートしました（${json.vcExcludeUsers.length}名）`);
-      } catch (e) { return interaction.reply({ content: `❌ 失敗: ${e.message}`, flags: 64 }); }
+        return interaction.editReply(`✅ インポートしました（${json.vcExcludeUsers.length}名）`);
+      } catch (e) { return interaction.editReply(`❌ 失敗: ${e.message}`); }
     }
 
     case 'tm': {
       if (!calendarEnabled) return interaction.reply('⚠️ Calendar未設定');
-      await interaction.deferReply();
       const month = interaction.options.getInteger('month');
       const day   = interaction.options.getInteger('day');
-      const [h]   = interaction.options.getString('time').split(':').map(Number);
-      const now   = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const target = { year: now.getFullYear(), month, day };
+      const parsed = parseHHMM(interaction.options.getString('time'));
+      if (!parsed) return interaction.reply({ content: '❌ 時刻は HH:MM 形式（例: 20:00）で指定してください', flags: 64 });
+      const [h]   = parsed;
+      const year  = resolveYear(month, day);
+      if (!isValidDate(year, month, day)) return interaction.reply({ content: `❌ ${month}/${day} は存在しない日付です`, flags: 64 });
+      await interaction.deferReply();
+      const target = { year, month, day };
       const weekday = getWeekday(target.year, target.month, target.day);
       const label = `**${month}/${day}(${weekday}) ${h}:00**`;
       const results = await queryMemberCalendars(target, h);
@@ -1318,19 +1448,21 @@ client.on('interactionCreate', async interaction => {
 
     case 'tm-week': {
       if (!calendarEnabled) return interaction.reply('⚠️ Calendar未設定');
+      const parsed = parseHHMM(interaction.options.getString('time'));
+      if (!parsed) return interaction.reply({ content: '❌ 時刻は HH:MM 形式（例: 20:00）で指定してください', flags: 64 });
+      const [h] = parsed;
       await interaction.deferReply();
-      const [h] = interaction.options.getString('time').split(':').map(Number);
-      const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+      const today = nowJstParts();
       let msg = '';
       for (let i = 0; i < 7; i++) {
-        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
-        const target = { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+        const d = new Date(Date.UTC(today.year, today.month - 1, today.day + i));
+        const target = { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
         const weekday = getWeekday(target.year, target.month, target.day);
         const label = `**${target.month}/${target.day}(${weekday}) ${h}:00**`;
         const results = await queryMemberCalendars(target, h);
         msg += formatCalendarResults(results, label) + '\n\n';
       }
-      return interaction.editReply(msg.trim());
+      return replyLong(interaction, msg.trim());
     }
 
     case 'cal-add': {
@@ -1345,14 +1477,19 @@ client.on('interactionCreate', async interaction => {
       const rawTitle  = interaction.options.getString('title') || '予定';
       const title     = `${memberCfg.label}${rawTitle}`;
 
-      const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const year = now.getFullYear();
-      const [sh, sm] = startTime.split(':').map(Number);
-      const [eh, em] = endTime.split(':').map(Number);
+      const startParsed = parseHHMM(startTime);
+      const endParsed   = parseHHMM(endTime);
+      if (!startParsed || !endParsed) return interaction.reply({ content: '❌ 時刻は HH:MM 形式（例: 19:00）で指定してください', flags: 64 });
+      const year = resolveYear(month, day);
+      if (!isValidDate(year, month, day)) return interaction.reply({ content: `❌ ${month}/${day} は存在しない日付です`, flags: 64 });
 
-      const startDt = new Date(Date.UTC(year, month - 1, day, sh - 9, sm, 0));
-      const endDt   = new Date(Date.UTC(year, month - 1, day, eh - 9, em, 0));
+      const startDt = jstDate(year, month, day, ...startParsed);
+      let   endDt   = jstDate(year, month, day, ...endParsed);
+      // 終了が開始以前なら日付をまたぐ予定として翌日扱い（例: 23:00〜01:00）
+      const overnight = endDt <= startDt;
+      if (overnight) endDt = new Date(endDt.getTime() + 24 * 60 * 60 * 1000);
 
+      await interaction.deferReply();
       try {
         await calendar.events.insert({
           calendarId: memberCfg.calendarId,
@@ -1362,8 +1499,8 @@ client.on('interactionCreate', async interaction => {
             end:   { dateTime: endDt.toISOString(),   timeZone: 'Asia/Tokyo' },
           },
         });
-        return interaction.reply(`✅ 「${title}」を ${month}/${day} ${startTime}〜${endTime} に追加しました`);
-      } catch (e) { return interaction.reply({ content: `❌ 追加失敗: ${e.message}`, flags: 64 }); }
+        return interaction.editReply(`✅ 「${title}」を ${year}/${month}/${day} ${startTime}〜${overnight ? '翌' : ''}${endTime} に追加しました`);
+      } catch (e) { return interaction.editReply(`❌ 追加失敗: ${e.message}`); }
     }
 
     case 'cal-add-allday': {
@@ -1377,14 +1514,19 @@ client.on('interactionCreate', async interaction => {
       const ed       = interaction.options.getInteger('end-day');
       const rawTitle = interaction.options.getString('title') || '予定';
       const title    = `${memberCfg.label}${rawTitle}`;
-      const now      = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const year     = now.getFullYear();
+      const year     = resolveYear(sm, sd);
+      // 終了月日が開始より前なら年をまたぐ予定（例: 12/30〜1/2）
+      const endYear  = Date.UTC(year, em - 1, ed) < Date.UTC(year, sm - 1, sd) ? year + 1 : year;
+      if (!isValidDate(year, sm, sd) || !isValidDate(endYear, em, ed)) {
+        return interaction.reply({ content: '❌ 存在しない日付が指定されています', flags: 64 });
+      }
 
       // 終日予定の終了日はGoogle Calendar的に「翌日」を指定
-      const endDate = new Date(year, em - 1, ed + 1);
-      const endDateStr = `${endDate.getFullYear()}-${String(endDate.getMonth()+1).padStart(2,'0')}-${String(endDate.getDate()).padStart(2,'0')}`;
+      const endDate = new Date(Date.UTC(endYear, em - 1, ed + 1));
+      const endDateStr = `${endDate.getUTCFullYear()}-${String(endDate.getUTCMonth()+1).padStart(2,'0')}-${String(endDate.getUTCDate()).padStart(2,'0')}`;
       const startDateStr = `${year}-${String(sm).padStart(2,'0')}-${String(sd).padStart(2,'0')}`;
 
+      await interaction.deferReply();
       try {
         await calendar.events.insert({
           calendarId: memberCfg.calendarId,
@@ -1394,8 +1536,8 @@ client.on('interactionCreate', async interaction => {
             end:   { date: endDateStr },
           },
         });
-        return interaction.reply(`✅ 「${title}」を ${sm}/${sd}〜${em}/${ed} の終日予定として追加しました`);
-      } catch (e) { return interaction.reply({ content: `❌ 追加失敗: ${e.message}`, flags: 64 }); }
+        return interaction.editReply(`✅ 「${title}」を ${year}/${sm}/${sd}〜${endYear}/${em}/${ed} の終日予定として追加しました`);
+      } catch (e) { return interaction.editReply(`❌ 追加失敗: ${e.message}`); }
     }
 
     case 'cal-delete': {
@@ -1404,26 +1546,26 @@ client.on('interactionCreate', async interaction => {
       if (!memberCfg) return interaction.reply({ content: '⚠️ カレンダーが設定されていません', flags: 64 });
 
       const weeks = interaction.options.getInteger('weeks');
-      const nowJst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const todayStartJst = new Date(nowJst.getFullYear(), nowJst.getMonth(), nowJst.getDate(), 0, 0, 0);
-      const timeMin = new Date(todayStartJst.getTime() - 9 * 60 * 60 * 1000);
-      const timeMax = new Date(todayStartJst.getTime() + weeks * 7 * 24 * 60 * 60 * 1000 - 9 * 60 * 60 * 1000);
+      const today = nowJstParts();
+      const timeMin = jstDate(today.year, today.month, today.day);
+      const timeMax = new Date(timeMin.getTime() + weeks * 7 * 24 * 60 * 60 * 1000);
 
+      await interaction.deferReply();
       try {
+        // リアクションで選べるのは10件まで
         const res = await calendar.events.list({
           calendarId: memberCfg.calendarId,
           timeMin: timeMin.toISOString(),
           timeMax: timeMax.toISOString(),
           singleEvents: true,
           orderBy: 'startTime',
-          maxResults: 19,
+          maxResults: 10,
         });
         const events = res.data.items ?? [];
 
-        const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟',
-                              '1️⃣1️⃣','1️⃣2️⃣','1️⃣3️⃣','1️⃣4️⃣','1️⃣5️⃣','1️⃣6️⃣','1️⃣7️⃣','1️⃣8️⃣','1️⃣9️⃣'];
+        const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 
-        if (events.length === 0) return interaction.reply({ content: '📭 予定がありません', flags: 64 });
+        if (events.length === 0) return interaction.editReply('📭 予定がありません');
 
         let msg = `📋 ${weeks}週間以内の予定一覧:\n`;
         events.forEach((ev, i) => {
@@ -1436,16 +1578,12 @@ client.on('interactionCreate', async interaction => {
             msg += `${i+1}. ${ev.summary} (${start}〜${end})\n`;
           }
         });
+        if (res.data.nextPageToken) msg += '（11件目以降は表示されません。期間を短くしてください）\n';
         msg += '\n数字リアクションで削除する予定を選択してください。❌でキャンセル。';
 
-        await interaction.reply({ content: msg });
-        const sentMsg = await interaction.fetchReply();
+        const sentMsg = await interaction.editReply({ content: msg });
 
-        await sentMsg.react('❌');
-        for (let i = 0; i < Math.min(events.length, 10); i++) {
-          await sentMsg.react(numberEmojis[i]);
-        }
-
+        // リアクションを付け終わる前に押されても反応できるよう、先にセッションを保存する
         db.data.pendingDeleteSessions[interaction.user.id] = {
           msgId: sentMsg.id,
           requesterId: interaction.user.id,
@@ -1453,10 +1591,13 @@ client.on('interactionCreate', async interaction => {
           calendarId: memberCfg.calendarId,
         };
         await db.write();
+
+        await sentMsg.react('❌');
+        for (let i = 0; i < events.length; i++) {
+          await sentMsg.react(numberEmojis[i]);
+        }
       } catch (e) {
-        const msg = `❌ 取得失敗: ${e.message}`;
-        if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: msg, flags: 64 });
-        return interaction.editReply(msg).catch(() => {});
+        return interaction.editReply(`❌ 取得失敗: ${e.message}`).catch(() => {});
       }
       break;
     }
@@ -1482,8 +1623,8 @@ client.on('interactionCreate', async interaction => {
           }
           const reminders = [];
           for (const [desc] of jobMap.entries()) {
-            if (desc.startsWith(`reminder:${e.id}:`)) {
-              const offsetMin = parseInt(desc.split(':')[2].replace('-',''));
+            if (desc.startsWith(`${EVENT_JOB_PREFIX}${e.id}:reminder:`)) {
+              const offsetMin = parseInt(desc.split(':')[3], 10);
               const reminderTime = new Date(e.scheduledStartTimestamp - offsetMin * 60000);
               const reminderJst = reminderTime.toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
               reminders.push(`${offsetMin}分前 (${reminderJst})`);
@@ -1491,7 +1632,7 @@ client.on('interactionCreate', async interaction => {
           }
           msg += `**◆ ${e.name}**\n　状態: ${status}\n　開催: ${startJst}\n　参加予定: ${members}\n　リマインド: ${reminders.length > 0 ? reminders.join(', ') : '（未登録）'}\n\n`;
         }
-        return interaction.editReply(msg.slice(0, 2000));
+        return replyLong(interaction, msg);
       } catch (e) { return interaction.editReply(`❌ エラー: ${e.message}`); }
     }
 
@@ -1502,6 +1643,8 @@ client.on('interactionCreate', async interaction => {
       const total = rolls.reduce((a, b) => a + b, 0);
       let msg = `🎲 **${interaction.user.displayName}** が **${count}d${faces}** を振りました！\n`;
       msg += count === 1 ? `結果: **${rolls[0]}**` : `結果: ${rolls.join(', ')}\n合計: **${total}**`;
+      // 面数が大きいと100個で2000文字を超えるので合計だけにする
+      if (msg.length > 2000) msg = `🎲 **${interaction.user.displayName}** が **${count}d${faces}** を振りました！\n合計: **${total}**（出目が多すぎるため個別表示は省略）`;
       return interaction.reply(msg);
     }
 
@@ -1509,15 +1652,16 @@ client.on('interactionCreate', async interaction => {
       const targetChannel = interaction.options.getChannel('channel');
       const message = interaction.options.getString('message');
       console.log(`📨 匿名メッセージ: ${interaction.user.username} (${interaction.user.id}) → #${targetChannel.name} : "${message}"`);
+      await interaction.deferReply({ flags: 64 });
       try {
         const ch = await client.channels.fetch(targetChannel.id);
         await ch.send(`🕵️ 誰かが匿名メッセージを送信しました\n${message}`);
-        return interaction.reply({ content: '✅ 匿名メッセージを送信しました', flags: 64 });
-      } catch (e) { return interaction.reply({ content: `❌ 送信失敗: ${e.message}`, flags: 64 }); }
+        return interaction.editReply('✅ 匿名メッセージを送信しました');
+      } catch (e) { return interaction.editReply(`❌ 送信失敗: ${e.message}`); }
     }
 
     case 'version': {
-      return interaction.reply('🤖 TKイベントリマインダーBot **v2.27.18**');
+      return interaction.reply(`🤖 TKイベントリマインダーBot **v${BOT_VERSION}**`);
     }
 
     case 'state-export': {
@@ -1525,7 +1669,7 @@ client.on('interactionCreate', async interaction => {
       if (!isAdmin) return interaction.reply({ content: '⛔ 管理者専用です', flags: 64 });
       const state = {
         exportedAt: new Date().toISOString(),
-        version: '2.27.18',
+        version: BOT_VERSION,
         morningTime: db.data.morningTime,
         reminderOffsets: db.data.reminderOffsets,
         eventMap: db.data.eventMap,
@@ -1567,15 +1711,11 @@ client.on('interactionCreate', async interaction => {
         if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
         if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
         if (json.channelSnapshot) db.data.channelSnapshot = json.channelSnapshot;
-        // gjDataは完全に置き換え
-        if (json.gjData !== undefined) {
+        // gjDataは完全に置き換え（ファイルに無い場合は現在のデータを残す）
+        if (json.gjData) {
           db.data.gjData = json.gjData;
           initGjData(db);
-        } else {
-          // gjDataがない場合はリセット
-          db.data.gjData = { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
         }
-        if (json.gjData)                         db.data.gjData                 = json.gjData;
         await db.write();
         bootstrapSchedules();
         const exportedAt = new Date(json.exportedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
@@ -1584,7 +1724,9 @@ client.on('interactionCreate', async interaction => {
           `　イベント記録: ${Object.keys(json.eventMap ?? {}).length}件\n` +
           `　ロール記録: ${Object.keys(json.eventRoles ?? {}).length}件\n` +
           `　リマインドメッセージ: ${(json.lastReminderMsgIds ?? []).length}件\n` +
-          `　除外ユーザー: ${(json.vcExcludeUsers ?? []).length}名\n\n` +
+          `　除外ユーザー: ${(json.vcExcludeUsers ?? []).length}名\n` +
+          `　GJ履歴: ${(json.gjData?.history ?? []).length}件\n` +
+          `　伝言予約: ${Object.keys(json.saylaterJobs ?? {}).length}件\n\n` +
           `cronを再登録しました。リマインド収集はそのまま継続されます。`
         );
       } catch (e) { return interaction.editReply(`❌ インポート失敗: ${e.message}`); }
@@ -1597,18 +1739,21 @@ client.on('interactionCreate', async interaction => {
       if (anonymous) {
         console.log(`👍 匿名GJ送信: ${interaction.user.username} (${interaction.user.id}) → ${target.username} (${target.id})`);
       }
+      if (target.bot) return interaction.reply({ content: '❌ Botにはグッジョブを送れません', flags: 64 });
+      // 実績・コンボ通知などで3秒を超えることがあるので先に応答を保留する
+      await interaction.deferReply({ flags: 64 });
       const guild      = await client.guilds.fetch(GUILD_ID);
       const fromMember = await guild.members.fetch(interaction.user.id).catch(() => null);
       const toMember   = await guild.members.fetch(target.id).catch(() => null);
-      if (!fromMember || !toMember) return interaction.reply({ content: '❌ ユーザーが見つかりません', flags: 64 });
+      if (!fromMember || !toMember) return interaction.editReply('❌ ユーザーが見つかりません');
       const ch = await client.channels.fetch(interaction.channelId);
       const result = await sendGoodJob(db, client, GUILD_ID, {
         fromId: interaction.user.id, fromName: fromMember.displayName,
         toId: target.id, toName: toMember.displayName,
         reason, anonymous, channel: ch
       });
-      if (!result.success) return interaction.reply({ content: result.reason, flags: 64 });
-      return interaction.reply({ content: '✅ グッジョブを送信しました！', flags: 64 });
+      if (!result.success) return interaction.editReply(result.reason);
+      return interaction.editReply('✅ グッジョブを送信しました！');
     }
 
     case 'goodjob-history': {
@@ -1673,6 +1818,7 @@ client.on('interactionCreate', async interaction => {
       const points = db.data.gjData.points ?? {};
       const sorted = Object.entries(points).sort((a,b) => b[1].gjp - a[1].gjp).slice(0, 10);
       if (sorted.length === 0) return interaction.reply('📭 まだグッジョブの記録がありません');
+      await interaction.deferReply();
       const guild = await client.guilds.fetch(GUILD_ID);
       let msg = `🏆 **グッジョブランキング**
 
@@ -1686,7 +1832,7 @@ client.on('interactionCreate', async interaction => {
         msg += `${medal} **${name}** - ${pts.gjp} GJP / ${pts.gsp} GSP
 `;
       }
-      return interaction.reply(msg);
+      return interaction.editReply(msg);
     }
 
     case 'saylatter-list': {
@@ -1709,8 +1855,7 @@ client.on('interactionCreate', async interaction => {
       const [id, job] = jobs[number - 1];
       const fireAtJst = new Date(job.fireAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
       // cronを停止
-      const desc = `simple-remind:${id}`;
-      if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
+      stopJob(`simple-remind:${id}`);
       // DBから削除
       delete db.data.saylaterJobs[id];
       await db.write();
@@ -1728,10 +1873,11 @@ client.on('interactionCreate', async interaction => {
       const msMap    = { minutes: 60 * 1000, hours: 60 * 60 * 1000, days: 24 * 60 * 60 * 1000 };
       const unitLabel = { minutes: '分', hours: '時間', days: '日' };
       const fireAt   = new Date(Date.now() + value * msMap[unit]);
+      // cron式は年を指定できないので1年以内に制限
+      if (fireAt.getTime() - Date.now() > 365 * 24 * 60 * 60 * 1000) {
+        return interaction.reply({ content: '❌ 伝言予約は1年以内で指定してください', flags: 64 });
+      }
       const fireAtJst = fireAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-      const jst  = new Date(fireAt.getTime() + 9 * 60 * 60 * 1000);
-      const expr = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
-      const desc = `simple-remind:${interaction.id}`;
 
       // DBに保存して継承できるようにする
       db.data.saylaterJobs[interaction.id] = {
@@ -1741,16 +1887,7 @@ client.on('interactionCreate', async interaction => {
         channelId: targetChannelId,
       };
       await db.write();
-
-      registerCron(expr, async () => {
-        try {
-          const ch = await client.channels.fetch(targetChannelId);
-          await ch.send(`<@${mentionUser.id}>\n${message}`);
-        } catch (e) { console.error(`❌ 伝言予約送信失敗:`, e.message); }
-        delete db.data.saylaterJobs[interaction.id];
-        await db.write();
-        if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
-      }, desc);
+      scheduleSaylaterJob(interaction.id);
 
       return interaction.reply({
         content: `✅ 伝言予約を設定しました\n　⏰ ${value}${unitLabel[unit]}後 (${fireAtJst})\n　📝 ${message}\n　👤 ${mentionUser.displayName ?? mentionUser.username}\n　📍 <#${targetChannelId}>`,
@@ -1766,18 +1903,18 @@ client.on('interactionCreate', async interaction => {
       const targetChannel   = interaction.options.getChannel('channel');
       const targetChannelId = targetChannel?.id ?? DEFAULT_REMIND_CHANNEL_ID;
 
-      const [h, m] = time.split(':').map(Number);
-      const nowJst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
-      const fireAt = new Date(Date.UTC(nowJst.getFullYear(), month - 1, day, h - 9, m, 0));
+      const parsed = parseHHMM(time);
+      if (!parsed) return interaction.reply({ content: '❌ 時刻は HH:MM 形式（例: 20:00）で指定してください', flags: 64 });
+      // 今日より前の月日は来年として扱う（12月に1月の予約をする場合など）
+      const year = resolveYear(month, day);
+      if (!isValidDate(year, month, day)) return interaction.reply({ content: `❌ ${month}/${day} は存在しない日付です`, flags: 64 });
+      const fireAt = jstDate(year, month, day, ...parsed);
 
       if (fireAt <= Date.now()) {
         return interaction.reply({ content: '❌ 指定した日時はすでに過去です', flags: 64 });
       }
 
       const fireAtJst = fireAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-      const jst  = new Date(fireAt.getTime() + 9 * 60 * 60 * 1000);
-      const expr = `${jst.getUTCMinutes()} ${jst.getUTCHours()} ${jst.getUTCDate()} ${jst.getUTCMonth() + 1} *`;
-      const desc = `simple-remind:${interaction.id}`;
 
       // DBに保存して継承できるようにする
       db.data.saylaterJobs[interaction.id] = {
@@ -1787,22 +1924,12 @@ client.on('interactionCreate', async interaction => {
         channelId: targetChannelId,
       };
       await db.write();
-
-      registerCron(expr, async () => {
-        try {
-          const ch = await client.channels.fetch(targetChannelId);
-          await ch.send(`<@${mentionUser.id}>\n${message}`);
-        } catch (e) { console.error(`❌ 伝言予約送信失敗:`, e.message); }
-        delete db.data.saylaterJobs[interaction.id];
-        await db.write();
-        if (jobMap.has(desc)) { jobMap.get(desc).stop(); jobMap.delete(desc); }
-      }, desc);
+      scheduleSaylaterJob(interaction.id);
 
       return interaction.reply({
         content: `✅ 伝言予約を設定しました\n　⏰ ${month}/${day} ${time} (${fireAtJst})\n　📝 ${message}\n　👤 ${mentionUser.displayName ?? mentionUser.username}\n　📍 <#${targetChannelId}>`,
       });
     }
-  }
 
     case 'activity-save': {
       await interaction.deferReply({ flags: 64 });
@@ -1946,15 +2073,16 @@ client.on('interactionCreate', async interaction => {
         const now14  = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
         const bulk   = targets.filter(m => m.createdAt > now14 && m.id !== confirmMsg.id);
         const single = targets.filter(m => m.createdAt <= now14 && m.id !== confirmMsg.id);
+        // 実際に削除できた件数だけ数える
         let deleted = 0;
         for (let i = 0; i < bulk.length; i += 100) {
-          await channel.bulkDelete(bulk.slice(i, i + 100), true).catch(() => {});
-          deleted += Math.min(100, bulk.length - i);
+          const res = await channel.bulkDelete(bulk.slice(i, i + 100), true).catch(() => null);
+          deleted += res?.size ?? 0;
         }
+        let singleTried = 0;
         for (const m of single) {
-          await m.delete().catch(() => {});
-          deleted++;
-          if (deleted % 10 === 0) await new Promise(r => setTimeout(r, 1000));
+          if (await m.delete().then(() => true).catch(() => false)) deleted++;
+          if (++singleTried % 10 === 0) await new Promise(r => setTimeout(r, 1000));
         }
         await confirmMsg.edit(`✅ ${deleted}件のメッセージを削除しました`);
         console.log(`🗑️ purge: ${interaction.user.username} が #${channel.name} で ${deleted}件削除`);
@@ -1962,7 +2090,7 @@ client.on('interactionCreate', async interaction => {
       break;
     }
   }
-});
+}
 
 // ============================================================
 // グローバルエラーハンドラー（Botのクラッシュを防ぐ）
