@@ -249,6 +249,7 @@ export async function sendMorningSummary(withEveryone = true) {
     .sort((a, b) => a.scheduledStartTimestamp - b.scheduledStartTimestamp);
   await stripAllEventRoles(guild);
   db.data.attendance = {};
+  db.data.reminderNotices = {};
   db.data.lastReminderMsgIds = [];
   db.data.reminderMsgMap = {};
   db.data.lastMorningDate = jstDateKey(Date.now());
@@ -356,6 +357,20 @@ function unansweredMentionLine(e) {
   return { text: `\n❔ 未回答: ${ids.map(id => `<@${id}>`).join(' ')}\n　出欠ボタンをお願いします！ → ${link}`, ids };
 }
 
+// 同じイベントの古いリマインドを消して、最新の1通だけ残す
+// （新しい通知を送ってから消すので、メンションの通知は届いたまま）
+// db.data.reminderNotices[eventId] = { channelId, msgId }
+async function replaceReminderNotice(eventId, newMsg) {
+  const prev = db.data.reminderNotices[eventId];
+  if (newMsg) db.data.reminderNotices[eventId] = { channelId: newMsg.channelId, msgId: newMsg.id };
+  else delete db.data.reminderNotices[eventId];
+  await db.write();
+  if (!prev) return;
+  const ch = await client.channels.fetch(prev.channelId).catch(() => null);
+  const old = ch ? await ch.messages.fetch(prev.msgId).catch(() => null) : null;
+  await old?.delete().catch(e => console.error('古いリマインドの削除失敗:', e.message));
+}
+
 export async function scheduleEventReminders() {
   const guild  = await client.guilds.fetch(GUILD_ID);
   const events = await fetchTodaysEvents(guild);
@@ -382,10 +397,11 @@ export async function scheduleEventReminders() {
         const role = await getOrCreateEventRole(g, current);
         // 最初のリマインドでは未回答の人にもメンションする
         const extra = offset === firstOffset ? unansweredMentionLine(current) : { text: '', ids: [] };
-        await ch.send({
+        const sent = await ch.send({
           content: `${role}\n⏰ **${offset}分前リマインド** 「${current.name}」\n📍 チャンネル: ${eventPlace(current)}\n🔗 イベント:   <${eventUrl(current)}>${extra.text}`,
           allowedMentions: { roles: [role.id], users: extra.ids },
         });
+        await replaceReminderNotice(e.id, sent);
       }, `${EVENT_JOB_PREFIX}${e.id}:reminder:${offset}`);
     }
   }
@@ -401,6 +417,8 @@ export async function scheduleEventReminders() {
       if (!current || current.status === STATUS_CANCELED || current.status === STATUS_COMPLETED) return;
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       await ch.send({ content: `@everyone\n🚀 **「${current.name}」が始まりました！**\n📍 会場: ${eventPlace(current)}\n🔗 イベント: <${eventUrl(current)}>`, allowedMentions: { parse: ['everyone'] } });
+      // 開始したら直前のリマインドは不要なので消す
+      await replaceReminderNotice(e.id, null);
     }, `${EVENT_JOB_PREFIX}${e.id}:start`);
 
     // 開始3分後：未参加チェック

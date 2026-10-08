@@ -6,7 +6,7 @@ import { BOT_VERSION } from './config.js';
 // エクスポート対象（配列で持つ項目は配列であることを確認してから取り込む）
 const ARRAY_KEYS  = ['reminderOffsets', 'lastReminderMsgIds', 'vcExcludeUsers', 'members'];
 const OBJECT_KEYS = ['eventMap', 'eventRoles', 'reminderMsgMap', 'activeVcSessions', 'pendingDeleteSessions',
-                     'saylaterJobs', 'repeatJobs', 'attendance', 'gjData', 'channelSnapshot'];
+                     'saylaterJobs', 'repeatJobs', 'attendance', 'reminderNotices', 'gjData', 'channelSnapshot'];
 const STRING_KEYS = ['morningTime', 'lastMorningDate'];
 
 export function buildStateExport() {

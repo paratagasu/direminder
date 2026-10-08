@@ -37,6 +37,7 @@ export function normalizeData(data) {
   data.saylaterJobs          ??= {};
   data.repeatJobs            ??= {};
   data.attendance            ??= {};
+  data.reminderNotices       ??= {};
   data.channelSnapshot       ??= { savedAt: null, channels: {} };
   // メンバー表が無ければ初期値を入れる（空配列は「全員削除した」状態なのでそのまま）
   if (!Array.isArray(data.members)) data.members = structuredClone(DEFAULT_MEMBERS);
