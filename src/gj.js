@@ -11,6 +11,23 @@ export function todayJst() {
   return new Date().toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo' });
 }
 
+// サーバーのタイムゾーン（KoyebはUTC）に関係なくJSTの年・月・時を返す
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+function jstParts(date) {
+  const j = new Date(new Date(date).getTime() + JST_OFFSET_MS);
+  return { year: j.getUTCFullYear(), month: j.getUTCMonth(), hour: j.getUTCHours() };
+}
+
+export function ensureMonthlyCounter(db, id) {
+  const mc = db.data.gjData.monthlyCounters;
+  mc[id] ??= { gjCounterCount: 0, monthlyGjp: 0, monthlyGsp: 0, uniqueSenders: [] };
+  mc[id].gjCounterCount ??= 0;
+  mc[id].monthlyGjp     ??= 0;
+  mc[id].monthlyGsp     ??= 0;
+  mc[id].uniqueSenders  ??= [];
+  return mc[id];
+}
+
 export function initGjData(db) {
   db.data.gjData ??= {};
   db.data.gjData.points          ??= {};
@@ -32,7 +49,12 @@ export function getDailySentCount(db, fromId, toId) {
 }
 
 function incrementDailySent(db, fromId, toId) {
-  const key = `${fromId}:${toId}:${todayJst()}`;
+  const today = todayJst();
+  // 前日以前のカウントは不要なので消す（エクスポートJSONの肥大化防止）
+  for (const k of Object.keys(db.data.gjData.dailySent)) {
+    if (!k.endsWith(`:${today}`)) delete db.data.gjData.dailySent[k];
+  }
+  const key = `${fromId}:${toId}:${today}`;
   db.data.gjData.dailySent[key] = (db.data.gjData.dailySent[key] ?? 0) + 1;
 }
 
@@ -43,6 +65,8 @@ export async function checkAchievements(db, client, GUILD_ID, userId, type, chan
   const history = db.data.gjData.history;
   db.data.gjData.achievements[userId] ??= { received: [], sent: [] };
   const ach  = db.data.gjData.achievements[userId];
+  ach.received ??= [];
+  ach.sent     ??= [];
   const msgs = [];
 
   if (type === 'received') {
@@ -60,10 +84,11 @@ export async function checkAchievements(db, client, GUILD_ID, userId, type, chan
       else break;
     }
 
-    if (count === 1   && !ach.received.includes('first'))   { ach.received.push('first');   msgs.push(`🌱 **初GJ達成！** <@${userId}> が初めてグッジョブを受け取りました！`); }
-    if (count === 10  && !ach.received.includes('10'))      { ach.received.push('10');      msgs.push(`👍 **GJ 10回達成！** <@${userId}> がグッジョブを10回受け取りました！`); }
-    if (count === 100 && !ach.received.includes('100'))     { ach.received.push('100');     msgs.push(`🔥 **GJ 100回達成！** <@${userId}> がグッジョブを100回受け取りました！！`); }
-    if (count === 500 && !ach.received.includes('500'))     { ach.received.push('500');     msgs.push(`👑 **GJ 500回達成！** <@${userId}> がグッジョブを500回受け取りました！！！`); }
+    // 「ちょうどN回」だと取りこぼすことがあるので「N回以上かつ未解除」で判定する
+    if (count >= 1   && !ach.received.includes('first'))   { ach.received.push('first');   msgs.push(`🌱 **初GJ達成！** <@${userId}> が初めてグッジョブを受け取りました！`); }
+    if (count >= 10  && !ach.received.includes('10'))      { ach.received.push('10');      msgs.push(`👍 **GJ 10回達成！** <@${userId}> がグッジョブを10回受け取りました！`); }
+    if (count >= 100 && !ach.received.includes('100'))     { ach.received.push('100');     msgs.push(`🔥 **GJ 100回達成！** <@${userId}> がグッジョブを100回受け取りました！！`); }
+    if (count >= 500 && !ach.received.includes('500'))     { ach.received.push('500');     msgs.push(`👑 **GJ 500回達成！** <@${userId}> がグッジョブを500回受け取りました！！！`); }
     if (senders >= 10 && !ach.received.includes('10src'))  { ach.received.push('10src');   msgs.push(`💎 **多方面から支持！** <@${userId}> が10人以上からグッジョブを受け取りました！`); }
     if (streak >= 7   && !ach.received.includes('7streak')){ ach.received.push('7streak'); msgs.push(`🌟 **7日連続GJ！** <@${userId}> が7日連続でグッジョブを受け取りました！`); }
   }
@@ -76,8 +101,8 @@ export async function checkAchievements(db, client, GUILD_ID, userId, type, chan
       new Date(h.timestamp).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo' }) === todayJst()
     ).length;
 
-    if (count === 1    && !ach.sent.includes('first'))   { ach.sent.push('first');   msgs.push(`🤝 **初GJ送信！** <@${userId}> が初めてグッジョブを送りました！`); }
-    if (targets === 10 && !ach.sent.includes('10tgt'))   { ach.sent.push('10tgt');   msgs.push(`❤️ **10人にGJ！** <@${userId}> が10人にグッジョブを送りました！`); }
+    if (count >= 1     && !ach.sent.includes('first'))   { ach.sent.push('first');   msgs.push(`🤝 **初GJ送信！** <@${userId}> が初めてグッジョブを送りました！`); }
+    if (targets >= 10  && !ach.sent.includes('10tgt'))   { ach.sent.push('10tgt');   msgs.push(`❤️ **10人にGJ！** <@${userId}> が10人にグッジョブを送りました！`); }
     if (targets >= 20  && !ach.sent.includes('20tgt'))   { ach.sent.push('20tgt');   msgs.push(`🌎 **20人以上にGJ！** <@${userId}> が20人以上にグッジョブを送りました！`); }
     if (todaySent >= 10 && !ach.sent.includes('10day'))  { ach.sent.push('10day');   msgs.push(`🫂 **1日10GJ！** <@${userId}> が1日に10回グッジョブを送りました！`); }
   }
@@ -103,12 +128,20 @@ export async function processGjChain(db, client, GUILD_ID, fromId, toId, channel
     }));
   };
 
+  // Hit数 = チェーン内のGJの回数（A→B→C なら 2Hit）
+  const hitsOf = (c) => c.chain.length - 1;
+  // 連鎖が成立した（2Hit以上の）チェーンだけ爆裂を通知する
+  const explode = async (c) => {
+    if (hitsOf(c) < 2) return;
+    try {
+      const ch = await client.channels.fetch(c.lastChannelId);
+      await ch.send(`💥 コンボチェーンが **${hitsOf(c)}Hit** で爆裂しました！Beat.`);
+    } catch (e) {}
+  };
+
   // 1時間以上経過 → 爆裂
   if (chain && now - chain.lastAt > 60 * 60 * 1000) {
-    try {
-      const ch = await client.channels.fetch(chain.lastChannelId);
-      await ch.send(`💥 コンボチェーンが **${chain.chain.length}Hit** で爆裂しました！Beat.`);
-    } catch (e) {}
+    await explode(chain);
     db.data.gjData.gjChain = null;
   }
 
@@ -123,7 +156,7 @@ export async function processGjChain(db, client, GUILD_ID, fromId, toId, channel
       cur.lastAt = now;
       cur.lastChannelId = channelId;
       await db.write(); // チェーン状態を永続化
-      const hits = cur.chain.length;
+      const hits = hitsOf(cur);
       try {
         const ch    = await client.channels.fetch(channelId);
         const names = await getNames(cur.chain);
@@ -135,10 +168,7 @@ export async function processGjChain(db, client, GUILD_ID, fromId, toId, channel
       } catch (e) { console.error('チェーン通知失敗:', e.message); }
     } else {
       // チェーン途切れ → 爆裂して新チェーン開始
-      try {
-        const ch = await client.channels.fetch(cur.lastChannelId);
-        await ch.send(`💥 コンボチェーンが **${cur.chain.length}Hit** で爆裂しました！Beat.`);
-      } catch (e) {}
+      await explode(cur);
       db.data.gjData.gjChain = { chain: [fromId, toId], lastAt: now, lastChannelId: channelId };
     }
   }
@@ -156,8 +186,7 @@ export async function checkGjCounter(db, fromId, toId, channel) {
   if (received.length > 0) {
     try { await channel.send(`# 🔥GJ COUNTER!!!`); } catch (e) {}
     [fromId, toId].forEach(id => {
-      db.data.gjData.monthlyCounters[id] ??= { gjCounterCount: 0, monthlyGjp: 0, monthlyGsp: 0, uniqueSenders: [] };
-      db.data.gjData.monthlyCounters[id].gjCounterCount++;
+      ensureMonthlyCounter(db, id).gjCounterCount++;
     });
   }
 }
@@ -179,17 +208,14 @@ export async function sendGoodJob(db, client, GUILD_ID, { fromId, fromName, toId
   // ポイント付与
   const toPoints = getGjPoints(db, toId);
   toPoints.gjp++;
-  db.data.gjData.monthlyCounters[toId] ??= { gjCounterCount: 0, monthlyGjp: 0, monthlyGsp: 0, uniqueSenders: [] };
-  db.data.gjData.monthlyCounters[toId].monthlyGjp++;
-  if (!db.data.gjData.monthlyCounters[toId].uniqueSenders.includes(fromId)) {
-    db.data.gjData.monthlyCounters[toId].uniqueSenders.push(fromId);
-  }
+  const toCounter = ensureMonthlyCounter(db, toId);
+  toCounter.monthlyGjp++;
+  if (!toCounter.uniqueSenders.includes(fromId)) toCounter.uniqueSenders.push(fromId);
 
   if (!anonymous) {
     const fromPoints = getGjPoints(db, fromId);
     fromPoints.gsp++;
-    db.data.gjData.monthlyCounters[fromId] ??= { gjCounterCount: 0, monthlyGjp: 0, monthlyGsp: 0, uniqueSenders: [] };
-    db.data.gjData.monthlyCounters[fromId].monthlyGsp++;
+    ensureMonthlyCounter(db, fromId).monthlyGsp++;
   }
 
   incrementDailySent(db, fromId, toId);
@@ -203,17 +229,22 @@ export async function sendGoodJob(db, client, GUILD_ID, { fromId, fromName, toId
     ? `\n（+1 GJP → ${toName}、GSPは匿名のため付与なし）`
     : `\n（+1 GJP → ${toName}、+1 GSP → ${fromName}）`;
 
-  await channel.send({ content: msg, allowedMentions: { users: [toId] } });
+  // ポイントは付与済みなので、通知に失敗しても処理は続ける
+  try { await channel.send({ content: msg, allowedMentions: { users: [toId] } }); }
+  catch (e) { console.error('GJ通知失敗:', e.message); }
 
-  // 実績チェック
-  await checkAchievements(db, client, GUILD_ID, toId, 'received', channel);
-  if (!anonymous) await checkAchievements(db, client, GUILD_ID, fromId, 'sent', channel);
+  try {
+    // 実績チェック
+    await checkAchievements(db, client, GUILD_ID, toId, 'received', channel);
+    if (!anonymous) await checkAchievements(db, client, GUILD_ID, fromId, 'sent', channel);
 
-  // コンボ・カウンター（非匿名のみ）
-  if (!anonymous) {
-    await processGjChain(db, client, GUILD_ID, fromId, toId, channel.id);
-    await checkGjCounter(db, fromId, toId, channel);
-  }
+    // コンボ・カウンター（非匿名のみ）
+    if (!anonymous) {
+      await processGjChain(db, client, GUILD_ID, fromId, toId, channel.id);
+      await checkGjCounter(db, fromId, toId, channel);
+    }
+  } catch (e) { console.error('GJ後処理失敗:', e.message); }
+  await db.write();
 
   return { success: true };
 }
@@ -224,8 +255,8 @@ export async function sendGoodJob(db, client, GUILD_ID, { fromId, fromName, toId
 export async function sendMonthlyAwards(db, client, GUILD_ID) {
   const mc      = db.data.gjData.monthlyCounters ?? {};
   const history = db.data.gjData.history ?? [];
-  const now     = new Date();
-  const monthStr = `${now.getFullYear()}年${now.getMonth() + 1}月`;
+  const nowJst   = jstParts(Date.now());
+  const monthStr = `${nowJst.year}年${nowJst.month + 1}月`;
 
   try {
     const ch    = await client.channels.fetch(GJ_ANNOUNCE_CHANNEL);
@@ -233,10 +264,14 @@ export async function sendMonthlyAwards(db, client, GUILD_ID) {
     const getName = async id => (await guild.members.fetch(id).catch(() => null))?.displayName ?? id;
 
     const entries = Object.entries(mc);
-    const topGjp     = entries.sort((a,b) => b[1].monthlyGjp - a[1].monthlyGjp)[0];
-    const topGsp     = entries.sort((a,b) => b[1].monthlyGsp - a[1].monthlyGsp)[0];
-    const topSenders = entries.sort((a,b) => (b[1].uniqueSenders?.length??0) - (a[1].uniqueSenders?.length??0))[0];
-    const topCounter = entries.sort((a,b) => b[1].gjCounterCount - a[1].gjCounterCount)[0];
+    const topBy = (score) => {
+      const best = [...entries].sort((a, b) => score(b[1]) - score(a[1]))[0];
+      return best && score(best[1]) > 0 ? best : undefined;
+    };
+    const topGjp     = topBy(c => c.monthlyGjp ?? 0);
+    const topGsp     = topBy(c => c.monthlyGsp ?? 0);
+    const topSenders = topBy(c => c.uniqueSenders?.length ?? 0);
+    const topCounter = topBy(c => c.gjCounterCount ?? 0);
 
     const [n1,n2,n3,n4] = await Promise.all([
       topGjp     ? getName(topGjp[0])     : '（なし）',
@@ -247,12 +282,12 @@ export async function sendMonthlyAwards(db, client, GUILD_ID) {
 
     // 研究結果
     const monthHistory = history.filter(h => {
-      const d = new Date(h.timestamp);
-      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+      const d = jstParts(h.timestamp);
+      return d.year === nowJst.year && d.month === nowJst.month;
     });
     const withThanks = monthHistory.filter(h => h.reason?.includes('ありがとう')).length;
     const reasonPct  = monthHistory.length > 0 ? Math.round(withThanks / monthHistory.length * 100) : 0;
-    const hours      = monthHistory.map(h => new Date(h.timestamp).getHours());
+    const hours      = monthHistory.map(h => jstParts(h.timestamp).hour);
     const topHour    = hours.length > 0 ? hours.sort((a,b) => hours.filter(x=>x===b).length - hours.filter(x=>x===a).length)[0] : '-';
     const weekdays   = monthHistory.map(h => new Date(h.timestamp).toLocaleDateString('ja-JP', { weekday: 'long', timeZone: 'Asia/Tokyo' }));
     const topDay     = weekdays.length > 0 ? weekdays.sort((a,b) => weekdays.filter(x=>x===b).length - weekdays.filter(x=>x===a).length)[0] : '-';
