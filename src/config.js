@@ -6,8 +6,10 @@ export const {
   DISCORD_TOKEN, GUILD_ID, ANNOUNCE_CHANNEL_ID,
   GOOGLE_SERVICE_ACCOUNT_KEY, GOOGLE_CALENDAR_ID,
   KLIPY_API_KEY,
-  // 自動バックアップ先（管理者とBotだけが見られる非公開チャンネル）。未設定なら自動バックアップは無効
-  BACKUP_CHANNEL_ID,
+  // 自動バックアップ先。BACKUP_USER_ID（そのユーザーへのDM）を優先し、無ければ BACKUP_CHANNEL_ID。どちらも無ければ無効
+  BACKUP_USER_ID, BACKUP_CHANNEL_ID,
+  // 設定するとバックアップを暗号化する（任意の長い文字列）
+  BACKUP_ENCRYPTION_KEY,
 } = process.env;
 
 export const PORT = process.env.PORT ?? 3000;

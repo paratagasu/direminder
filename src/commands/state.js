@@ -59,7 +59,8 @@ export const commands = [
       return interaction.reply({
         content: [
           '🗄️ **自動バックアップ**',
-          `　設定: ${s.configured ? '✅ BACKUP_CHANNEL_ID 設定済み' : '❌ 未設定（環境変数 BACKUP_CHANNEL_ID を設定してください）'}`,
+          `　保存先: ${s.configured ? `✅ ${s.target}` : '❌ 未設定（環境変数 BACKUP_USER_ID か BACKUP_CHANNEL_ID を設定してください）'}`,
+          `　暗号化: ${s.encrypted ? '🔒 あり' : '⚠️ なし（BACKUP_ENCRYPTION_KEY を設定すると暗号化されます）'}`,
           `　動作: ${s.enabled ? '✅ 有効' : '⏸ 停止中'}`,
           `　起動時の復元: ${s.restoreResult ?? '―'}`,
           `　最終バックアップ: ${s.lastBackupAt ? formatJst(s.lastBackupAt) : '―'}`,
@@ -73,7 +74,7 @@ export const commands = [
     data: new SlashCommandBuilder().setName('backup-now').setDescription('今すぐ自動バックアップを実行する（管理者専用）'),
     async execute(interaction) {
       if (!isAdmin(interaction)) return adminOnly(interaction);
-      if (!backupStatus.configured) return interaction.reply({ content: '❌ BACKUP_CHANNEL_ID が未設定です', flags: EPHEMERAL });
+      if (!backupStatus.configured) return interaction.reply({ content: '❌ BACKUP_USER_ID / BACKUP_CHANNEL_ID が未設定です', flags: EPHEMERAL });
       await interaction.deferReply({ flags: EPHEMERAL });
       enableBackup();
       try {
