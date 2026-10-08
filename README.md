@@ -1,0 +1,89 @@
+# TKイベントリマインダーBot
+
+Discord のイベントリマインド・出欠管理・Googleカレンダー連携・グッジョブ(GJ)システムを持つBotです。
+
+- ホスティング: Koyeb（Dockerfile でビルド / Node.js 22）
+- 死活監視: UptimeRobot（`/` にヘルスチェック用のJSONを返す）
+
+## ファイル構成
+
+```
+index.js                  エントリーポイント（起動順序・ヘルスチェック・終了処理）
+src/
+  config.js               環境変数・定数（BOT_VERSION もここ）
+  client.js               Discordクライアント
+  db.js                   状態の保存（settings.json）
+  state.js                状態のエクスポート／インポート
+  backup.js               自動バックアップ・起動時の自動復元
+  schedules.js            定期実行の登録
+  cron.js                 cron管理
+  time.js / util.js       日時・共通ヘルパー
+  members.js              メンバー表（Discordアカウント ↔ カレンダー）
+  members.default.js      メンバー表の初期値（初回起動時のみ使用）
+  calendar.js             Googleカレンダー連携・空き時間検索
+  gj.js                   グッジョブシステム
+  features/
+    events.js             朝リマインド・出欠ボタン・各種リマインド・VC参加記録
+    reactions.js          リアクションの振り分け（GJ・出欠・予定削除）
+    saylater.js           伝言予約（1回きり・定期）
+    fun.js                GIF・ランダムカタカナ
+  commands/               スラッシュコマンド（機能ごとにファイルを分割）
+    index.js              コマンド登録・振り分け
+```
+
+コマンドを追加するときは `src/commands/` の該当ファイルの `commands` 配列に `{ data, execute }` を足すだけで登録されます。
+
+## 環境変数（Koyeb）
+
+| 変数名 | 用途 |
+|---|---|
+| `DISCORD_TOKEN` | BotのDiscordトークン |
+| `GUILD_ID` | 対象サーバーID |
+| `ANNOUNCE_CHANNEL_ID` | リマインド送信先チャンネルID |
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | GoogleサービスアカウントJSON（1行） |
+| `GOOGLE_CALENDAR_ID` | イベント登録先カレンダーID |
+| `KLIPY_API_KEY` | GIF配信API |
+| `BACKUP_CHANNEL_ID` | **自動バックアップ先チャンネルID**（任意・下記参照） |
+
+## 自動バックアップ（BACKUP_CHANNEL_ID）
+
+Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの状態を Discord のチャンネルに自動保存します。
+
+1. 管理者とBotだけが見られる非公開チャンネルを作る（Botに「メッセージを見る・送信・ファイルを添付・メッセージ履歴を読む」権限）
+2. そのチャンネルIDを `BACKUP_CHANNEL_ID` に設定する
+
+- Botはそのチャンネルに **メッセージを1件だけ** 置き、変更があるたびに **上書き編集** します。編集は通知も未読も付かないので、メンバーに通知が飛ぶことはありません（最初の1回も @silent で投稿）。
+- 起動時にそのメッセージから自動で状態を復元します。再デプロイ時（終了シグナル受信時）にも最新の状態を書き出します。
+- 復元に失敗したときは、正しいバックアップを壊さないよう自動バックアップを止めます。`/backup-status` で状態を確認し、`/state-import` で手動復元するか `/backup-now` で今の状態から再開してください。
+- **バックアップのメッセージは削除しないでください。**
+
+`/state-export` `/state-import` による手動の引き継ぎも引き続き使えます。
+
+## 主なコマンド
+
+**イベント・出欠**
+- 毎朝の一覧に「出席／欠席」ボタン。押した人にだけ結果が表示され、メッセージに出席・欠席・未回答が名前付きで表示されます（もう一度押すと取り消し）
+- 最初のリマインド（既定60分前）で未回答のメンバーにメンション
+- `/set-morning-time` `/add-reminder-offset` `/remove-reminder-offset` `/list-reminder-offsets` `/week-events` `/force-remind` `/n-force-remind` `/debug-events`
+
+**カレンダー**
+- `/tm` `/tm-week` 指定時刻の予定確認
+- `/tm-free` 全員（または指定人数以上）が空いている時間帯を探す
+- `/cal-add` `/cal-add-allday` `/cal-delete` 自分のカレンダーに予定を追加・削除
+
+**メンバー管理（管理者）**
+- `/member-list` `/member-add` `/member-link`（サブ垢追加） `/member-unlink` `/member-remove`
+- 先頭に登録したアカウントがメイン（未回答メンションの宛先）になります
+
+**伝言予約**
+- `/saylatter-rel` `/saylatter-abs` `/saylatter-list` `/saylatter-cancel`
+- 定期: `/saylatter-repeat-add`（毎日・平日・毎週・毎月・毎月末） `/saylatter-repeat-list` `/saylatter-repeat-pause` `/saylatter-repeat-test` `/saylatter-repeat-delete`
+
+**グッジョブ**
+- `/goodjob` `:GOOD_JOB:` リアクション
+- メッセージやユーザーを右クリック →「アプリ」→「このメッセージにGJ」「GJを送る」（ひとこと入力つき）
+- `/goodjob-ranking`（累計／今月・受け取り／送り） `/goodjob-status` `/goodjob-history`
+
+**その他**
+- `/gif-random` `/gif-category` `/random-katakana` `/dice` `/anonymous` `/activity-save` `/activity-check` `/purge` `/version`
+- 管理: `/state-export` `/state-import` `/backup-status` `/backup-now`

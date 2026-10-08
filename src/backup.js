@@ -1,0 +1,126 @@
+// 自動バックアップ
+// 管理者とBotだけが見られる非公開チャンネルに「1件のメッセージ」を置き、それを上書き編集し続ける。
+// ・メッセージの編集は通知も未読マークも付かないので、メンバーに迷惑がかからない
+// ・最初の1回だけ投稿するが、@silent（通知なし）で送る
+// 起動時はそのメッセージの添付ファイルから状態を復元する。
+import { AttachmentBuilder, MessageFlags } from 'discord.js';
+import { client } from './client.js';
+import { db, onDbWrite } from './db.js';
+import { BACKUP_CHANNEL_ID } from './config.js';
+import { buildStateExport, applyState } from './state.js';
+import { formatJst } from './time.js';
+
+const FILE_NAME = 'bot-state-backup.json';
+const DEBOUNCE_MS = Number(process.env.BACKUP_DEBOUNCE_MS) || 30 * 1000;
+
+export const backupStatus = {
+  configured: !!BACKUP_CHANNEL_ID,
+  enabled: false,        // 復元処理が終わるまでは false（空の状態で上書きしないため）
+  lastBackupAt: null,
+  lastError: null,
+  restoreResult: null,
+};
+let timer = null;
+let messageId = null;
+let lastFingerprint = null;
+let running = Promise.resolve();
+
+onDbWrite(() => {
+  if (!backupStatus.enabled || timer) return;
+  timer = setTimeout(() => { timer = null; runBackup().catch(() => {}); }, DEBOUNCE_MS);
+});
+
+async function findBackupMessage(channel) {
+  if (messageId) {
+    const m = await channel.messages.fetch(messageId).catch(() => null);
+    if (m) return m;
+  }
+  const msgs = await channel.messages.fetch({ limit: 50 });
+  return msgs.find(m => m.author.id === client.user.id && m.attachments.some(a => a.name === FILE_NAME)) ?? null;
+}
+
+// バックアップを実行（同時実行しないよう直列化）
+export function runBackup({ force = false } = {}) {
+  const p = running.then(() => doBackup(force));
+  running = p.catch(() => {}); // 失敗しても次のバックアップは実行できるようにする
+  return p.catch(e => {
+    backupStatus.lastError = e.message;
+    console.error('❌ 自動バックアップ失敗:', e.message);
+    throw e;
+  });
+}
+
+async function doBackup(force) {
+  if (!backupStatus.configured) throw new Error('BACKUP_CHANNEL_ID が未設定です');
+  const state = buildStateExport();
+  // 内容が変わっていなければ何もしない（保存時刻だけの変化は無視）
+  const fingerprint = JSON.stringify({ ...state, exportedAt: null, savedAt: null });
+  if (!force && fingerprint === lastFingerprint) return;
+
+  const channel = await client.channels.fetch(BACKUP_CHANNEL_ID);
+  const file = new AttachmentBuilder(Buffer.from(JSON.stringify(state), 'utf-8'), { name: FILE_NAME });
+  const content = `🗄️ Botの自動バックアップです（自動で上書き更新されます。削除しないでください）\n最終更新: ${formatJst(new Date())}`;
+  let msg = await findBackupMessage(channel);
+  if (msg) {
+    await msg.edit({ content, files: [file], attachments: [] });
+  } else {
+    msg = await channel.send({ content, files: [file], flags: MessageFlags.SuppressNotifications });
+  }
+  messageId = msg.id;
+  lastFingerprint = fingerprint;
+  backupStatus.lastBackupAt = new Date().toISOString();
+  backupStatus.lastError = null;
+  console.log('🗄️ 自動バックアップ完了');
+}
+
+// 起動時の復元。バックアップの方が新しければ取り込む
+export async function restoreFromBackup() {
+  if (!backupStatus.configured) {
+    backupStatus.restoreResult = '未設定（BACKUP_CHANNEL_ID なし）';
+    return { status: 'disabled' };
+  }
+  try {
+    const channel = await client.channels.fetch(BACKUP_CHANNEL_ID);
+    const msg = await findBackupMessage(channel);
+    if (!msg) {
+      backupStatus.enabled = true;
+      backupStatus.restoreResult = 'バックアップなし（新規作成します）';
+      runBackup({ force: true }).catch(() => {});
+      return { status: 'none' };
+    }
+    messageId = msg.id;
+    const att = msg.attachments.find(a => a.name === FILE_NAME);
+    const res = await fetch(att.url);
+    if (!res.ok) throw new Error(`バックアップの取得に失敗 (${res.status})`);
+    const json = await res.json();
+
+    const localSavedAt  = db.data.savedAt ? Date.parse(db.data.savedAt) : 0;
+    const backupSavedAt = json.savedAt ? Date.parse(json.savedAt) : Date.parse(json.exportedAt);
+    if (localSavedAt > backupSavedAt) {
+      backupStatus.enabled = true;
+      backupStatus.restoreResult = 'ローカルの状態の方が新しいため復元せず';
+      runBackup({ force: true }).catch(() => {});
+      return { status: 'skipped' };
+    }
+    await applyState(json);
+    backupStatus.enabled = true;
+    backupStatus.restoreResult = `復元しました（${formatJst(backupSavedAt)} 時点）`;
+    console.log(`🗄️ バックアップから復元: ${formatJst(backupSavedAt)} 時点`);
+    return { status: 'restored', savedAt: backupSavedAt };
+  } catch (e) {
+    // 復元に失敗したときは、正しいバックアップを空の状態で上書きしないよう自動バックアップを止めておく
+    backupStatus.lastError = e.message;
+    backupStatus.restoreResult = `復元失敗: ${e.message}（上書きしないよう自動バックアップを停止中。/state-import で手動復元するか、/backup-now で今の状態から再開）`;
+    console.error('❌ バックアップからの復元失敗:', e.message);
+    return { status: 'error', error: e };
+  }
+}
+
+export function enableBackup() { backupStatus.enabled = true; }
+
+// 終了時（Koyebの再デプロイ時など）に未保存の変更を書き出す
+export async function flushBackup() {
+  if (!backupStatus.enabled) return;
+  if (timer) { clearTimeout(timer); timer = null; }
+  await runBackup().catch(() => {});
+}
