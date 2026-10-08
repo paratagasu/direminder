@@ -91,4 +91,5 @@ Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの
 
 **その他**
 - `/gif-random` `/gif-category` `/random-katakana` `/dice` `/anonymous` `/activity-save` `/activity-check` `/purge` `/version`
+- `/channel-viewers` 実行したチャンネルを閲覧できるメンバーをメンバー表の名前で一覧表示（メンションなし・複数アカウントはどれか1つで閲覧可）
 - 管理: `/state-export` `/state-import` `/backup-status` `/backup-now`

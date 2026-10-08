@@ -10,8 +10,10 @@ export async function replyLong(interaction, text, { ephemeral = false } = {}) {
     buf += (buf ? '\n' : '') + line;
   }
   if (buf) chunks.push(buf);
-  await interaction.editReply(chunks[0] || '（なし）');
-  for (const c of chunks.slice(1)) await interaction.followUp({ content: c, ...(ephemeral && { flags: EPHEMERAL }) });
+  // 一覧表示で誰かに通知が飛ばないよう、メンションは常に無効にする
+  const allowedMentions = { parse: [] };
+  await interaction.editReply({ content: chunks[0] || '（なし）', allowedMentions });
+  for (const c of chunks.slice(1)) await interaction.followUp({ content: c, allowedMentions, ...(ephemeral && { flags: EPHEMERAL }) });
 }
 
 export function isAdmin(interaction) {
