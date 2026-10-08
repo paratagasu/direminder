@@ -67,8 +67,9 @@ Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの
 ## 主なコマンド
 
 **イベント・出欠**
-- 毎朝の一覧に「出席／欠席」ボタン。押した人にだけ結果が表示され、メッセージに出席・欠席・未回答が名前付きで表示されます（もう一度押すと取り消し）
-- 最初のリマインド（既定60分前）で未回答のメンバーにメンション
+- 毎朝、イベントごとに出欠カード（埋め込み）を1枚投稿。「出席／欠席」ボタンを押すと本人にだけ結果が表示され、カードの出席・欠席・未回答がリアルタイムに更新されます（もう一度押すと取り消し）
+- 出欠はメンバー表の「名前」単位で集計。アカウントを複数持つ人は、どれか1つでも押していれば回答済み（出席が欠席より優先）
+- リマインドはイベント専用ロールへのメンション。次のリマインド・開始アナウンスを送ると、ひとつ前のリマインドは自動で消えます
 - `/set-morning-time` `/add-reminder-offset` `/remove-reminder-offset` `/list-reminder-offsets` `/week-events` `/force-remind` `/n-force-remind` `/debug-events`
 
 **カレンダー**
@@ -78,7 +79,6 @@ Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの
 
 **メンバー管理（管理者）**
 - `/member-list` `/member-add` `/member-link`（サブ垢追加） `/member-unlink` `/member-remove`
-- 先頭に登録したアカウントがメイン（未回答メンションの宛先）になります
 
 **伝言予約**
 - `/saylatter-rel` `/saylatter-abs` `/saylatter-list` `/saylatter-cancel`

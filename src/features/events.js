@@ -1,5 +1,5 @@
 // イベント管理：朝リマインド・出欠（ボタン）・各種リマインド・VC参加記録
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Events } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Events } from 'discord.js';
 import { joinVoiceChannel, getVoiceConnection } from '@discordjs/voice';
 import { client } from '../client.js';
 import { db } from '../db.js';
@@ -91,12 +91,20 @@ async function stripAllEventRoles(guild) {
 // ============================================================
 // 出欠（ボタン）
 // ============================================================
-// db.data.attendance[eventId] = { eventName, header, yes: [], no: [], names: {}, channelId, msgId }
+// db.data.attendance[eventId] = { eventName, info: { name, url, time, place, host }, yes: [], no: [], names: {}, channelId, msgId }
+// 出欠はイベントごとの埋め込みカード1枚で表示し、ボタンが押されるたびにカードを書き換える
 
-function buildHeader(e) {
-  const time = new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });
-  const host = e.creator?.username || '不明';
-  return `## ◆${e.name}\n${time} / ${host}\n📍 チャンネル: ${eventPlace(e)}\n🔗 イベント:   <${eventUrl(e)}>`;
+// カードの帯の色
+export const CARD_COLORS = { open: 0x57F287, ended: 0x99AAB5, canceled: 0xED4245 };
+
+function buildInfo(e) {
+  return {
+    name: e.name,
+    url: eventUrl(e),
+    time: new Date(e.scheduledStartTimestamp).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' }),
+    place: e.channelId ? `🔊 <#${e.channelId}>` : `📍 ${e.entityMetadata?.location || '場所未設定'}`,
+    host: e.creator?.username || '不明',
+  };
 }
 
 export function attendanceButtons(eventId, disabled = false) {
@@ -106,7 +114,8 @@ export function attendanceButtons(eventId, disabled = false) {
   )];
 }
 
-// 出欠をメンバー単位（サブ垢もまとめて1人）で集計
+// 出欠をメンバー名単位で集計する。
+// アカウントを複数持つメンバーは、どれか1つでも反応していれば回答済み（出席が欠席より優先）
 export function summarizeAttendance(att) {
   const yes = [], no = [], unanswered = [];
   const seen = new Set();
@@ -123,18 +132,41 @@ export function summarizeAttendance(att) {
   return { yes, no, unanswered };
 }
 
-export function renderAttendance(att, { closed = null } = {}) {
+// 埋め込みのフィールドは1024文字まで
+function nameList(names) {
+  if (names.length === 0) return '―';
+  let out = '';
+  for (let i = 0; i < names.length; i++) {
+    const rest = `\n…他${names.length - i}人`;
+    if ((out + '\n' + names[i]).length > 1024 - rest.length) return out + rest;
+    out += (out ? '\n' : '') + names[i];
+  }
+  return out;
+}
+
+// closed: { text, kind: 'ended' | 'canceled' }（受付終了時のみ）
+export function buildAttendanceMessage(eventId, att, closed = null) {
   const { yes, no, unanswered } = summarizeAttendance(att);
-  const list = arr => (arr.length ? arr.join('、') : '―');
-  const lines = [
-    att.header,
-    '',
-    `✅ **出席 (${yes.length})**: ${list(yes)}`,
-    `❌ **欠席 (${no.length})**: ${list(no)}`,
-  ];
-  if (getMembers().length > 0) lines.push(`❔ **未回答 (${unanswered.length})**: ${list(unanswered.map(u => u.name))}`);
-  lines.push('', closed ?? '下のボタンで出欠を教えてください！（もう一度押すと取り消し）');
-  return lines.join('\n');
+  const info = att.info;
+  const embed = new EmbedBuilder()
+    .setColor(closed ? CARD_COLORS[closed.kind] : CARD_COLORS.open)
+    .setTitle(info ? info.name : att.eventName)
+    .setDescription(info ? `🕘 ${info.time}〜 ｜ ${info.place} ｜ 👤 ${info.host}` : (att.header ?? '―'))
+    .addFields(
+      { name: `✅ 出席 (${yes.length})`, value: nameList(yes), inline: true },
+      { name: `❌ 欠席 (${no.length})`, value: nameList(no), inline: true },
+    )
+    .setFooter({ text: closed ? closed.text : 'ボタンで出欠を登録（もう一度押すと取り消し）' });
+  if (info?.url) embed.setURL(info.url);
+  if (getMembers().length > 0) {
+    embed.addFields({ name: `❔ 未回答 (${unanswered.length})`, value: nameList(unanswered.map(u => u.name)), inline: true });
+  }
+  return {
+    content: '',
+    embeds: [embed],
+    components: attendanceButtons(eventId, !!closed),
+    allowedMentions: { parse: [] },
+  };
 }
 
 async function fetchAttendanceMessage(att) {
@@ -142,16 +174,14 @@ async function fetchAttendanceMessage(att) {
   return ch ? await ch.messages.fetch(att.msgId).catch(() => null) : null;
 }
 
-export async function refreshAttendanceMessage(eventId, { closed = null } = {}) {
+export async function refreshAttendanceMessage(eventId, closed = null) {
   const att = db.data.attendance[eventId];
   if (!att?.msgId) return;
+  if (closed) att.closed = closed; // 終了・キャンセル後に押されても表示が戻らないように
   const msg = await fetchAttendanceMessage(att);
   if (!msg) return;
-  await msg.edit({
-    content: renderAttendance(att, { closed }),
-    components: attendanceButtons(eventId, !!closed),
-    allowedMentions: { parse: [] },
-  }).catch(e => console.error('出欠メッセージ更新失敗:', e.message));
+  await msg.edit(buildAttendanceMessage(eventId, att, att.closed ?? null))
+    .catch(e => console.error('出欠メッセージ更新失敗:', e.message));
 }
 
 async function getEventRoleById(guild, eventId) {
@@ -190,7 +220,7 @@ export async function setAttendance(eventId, userId, status, displayName) {
 export async function handleAttendanceButton(interaction) {
   const [, status, eventId] = interaction.customId.split(':');
   const att = db.data.attendance[eventId];
-  if (!att) return interaction.reply({ content: '⚠️ このイベントの出欠受付は終了しています', flags: EPHEMERAL });
+  if (!att || att.closed) return interaction.reply({ content: '⚠️ このイベントの出欠受付は終了しています', flags: EPHEMERAL });
   await interaction.deferReply({ flags: EPHEMERAL });
   const uid = interaction.user.id;
   const current = att.yes.includes(uid) ? 'yes' : att.no.includes(uid) ? 'no' : null;
@@ -229,9 +259,9 @@ export async function handleAttendanceReaction(reaction, user, add) {
 
 async function postAttendanceMessage(guild, channel, e) {
   await getOrCreateEventRole(guild, e);
-  const att = { eventName: e.name, header: buildHeader(e), yes: [], no: [], names: {}, channelId: channel.id, msgId: null };
+  const att = { eventName: e.name, info: buildInfo(e), yes: [], no: [], names: {}, channelId: channel.id, msgId: null };
   db.data.attendance[e.id] = att;
-  const sent = await channel.send({ content: renderAttendance(att), components: attendanceButtons(e.id), allowedMentions: { parse: [] } });
+  const sent = await channel.send(buildAttendanceMessage(e.id, att));
   att.msgId = sent.id;
   db.data.lastReminderMsgIds.push(sent.id);
   db.data.reminderMsgMap[sent.id] = e.id;
@@ -311,10 +341,10 @@ export async function reconcileAttendance() {
       catch (e) { console.error('リアクション読み取り失敗:', e.message); continue; }
       const names = {};
       for (const id of [...yes, ...no]) names[id] = guild.members.cache.get(id)?.displayName ?? id;
-      att = { eventName: event.name, header: buildHeader(event), yes, no, names, channelId: channel.id, msgId };
+      att = { eventName: event.name, info: buildInfo(event), yes, no, names, channelId: channel.id, msgId };
       db.data.attendance[eventId] = att;
       await db.write();
-      await msg.edit({ content: renderAttendance(att), components: attendanceButtons(eventId), allowedMentions: { parse: [] } })
+      await msg.edit(buildAttendanceMessage(eventId, att))
         .catch(e => console.error('出欠メッセージ変換失敗:', e.message));
       await msg.reactions.removeAll().catch(() => {}); // 権限が無ければそのまま
       result.converted++;
@@ -348,15 +378,6 @@ export async function reconcileAttendance() {
 export const EVENT_JOB_PREFIX = 'event:';
 const PAST_GRACE_MS = 60 * 1000;
 
-function unansweredMentionLine(e) {
-  const att = db.data.attendance[e.id];
-  if (!att) return { text: '', ids: [] };
-  const ids = summarizeAttendance(att).unanswered.map(u => u.id).filter(Boolean);
-  if (ids.length === 0) return { text: '', ids: [] };
-  const link = `https://discord.com/channels/${GUILD_ID}/${att.channelId}/${att.msgId}`;
-  return { text: `\n❔ 未回答: ${ids.map(id => `<@${id}>`).join(' ')}\n　出欠ボタンをお願いします！ → ${link}`, ids };
-}
-
 // 同じイベントの古いリマインドを消して、最新の1通だけ残す
 // （新しい通知を送ってから消すので、メンションの通知は届いたまま）
 // db.data.reminderNotices[eventId] = { channelId, msgId }
@@ -377,7 +398,6 @@ export async function scheduleEventReminders() {
   const wanted = new Set();
   const now = Date.now();
   const offsets = db.data.reminderOffsets ?? [60, 15];
-  const firstOffset = Math.max(...offsets);
 
   // 過去の時刻は登録しない（日付指定のcronは翌年に発火してしまうため）
   const registerEventCron = (at, fn, desc) => {
@@ -395,11 +415,9 @@ export async function scheduleEventReminders() {
         if (!current || current.status !== STATUS_SCHEDULED) return;
         const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
         const role = await getOrCreateEventRole(g, current);
-        // 最初のリマインドでは未回答の人にもメンションする
-        const extra = offset === firstOffset ? unansweredMentionLine(current) : { text: '', ids: [] };
         const sent = await ch.send({
-          content: `${role}\n⏰ **${offset}分前リマインド** 「${current.name}」\n📍 チャンネル: ${eventPlace(current)}\n🔗 イベント:   <${eventUrl(current)}>${extra.text}`,
-          allowedMentions: { roles: [role.id], users: extra.ids },
+          content: `${role}\n⏰ **${offset}分前リマインド** 「${current.name}」\n📍 チャンネル: ${eventPlace(current)}\n🔗 イベント:   <${eventUrl(current)}>`,
+          allowedMentions: { roles: [role.id] },
         });
         await replaceReminderNotice(e.id, sent);
       }, `${EVENT_JOB_PREFIX}${e.id}:reminder:${offset}`);
@@ -533,9 +551,9 @@ async function endVcSession(eventId, eventName) {
 // ============================================================
 // Discordイベントの監視
 // ============================================================
-async function closeAttendance(eventId, text) {
+async function closeAttendance(eventId, text, kind) {
   if (!db.data.attendance[eventId]) return;
-  await refreshAttendanceMessage(eventId, { closed: text });
+  await refreshAttendanceMessage(eventId, { text, kind });
 }
 
 export function registerEventHandlers() {
@@ -567,13 +585,13 @@ export function registerEventHandlers() {
         console.log(`⏹ イベント完了: "${newEvent.name}"`);
         await endVcSession(newEvent.id, newEvent.name);
         await deleteEventRole(guild, newEvent.id);
-        await closeAttendance(newEvent.id, '🏁 このイベントは終了しました');
+        await closeAttendance(newEvent.id, '🏁 このイベントは終了しました', 'ended');
       } else if (newEvent.status === STATUS_CANCELED) {
         await deleteEventRole(guild, newEvent.id);
         await deleteCalendarEvent(newEvent.id, newEvent.name);
         delete db.data.activeVcSessions[newEvent.id];
         await db.write();
-        await closeAttendance(newEvent.id, '🚫 このイベントはキャンセルされました');
+        await closeAttendance(newEvent.id, '🚫 このイベントはキャンセルされました', 'canceled');
       }
       // 時刻・名前などの変更も含め、cronを即座に更新
       await scheduleEventReminders();
@@ -596,7 +614,7 @@ export function registerEventHandlers() {
       await deleteCalendarEvent(event.id, event.name);
       delete db.data.activeVcSessions[event.id];
       await db.write();
-      await closeAttendance(event.id, '🚫 このイベントは削除されました');
+      await closeAttendance(event.id, '🚫 このイベントは削除されました', 'canceled');
       await scheduleEventReminders();
     } catch (e) { console.error('イベント削除処理エラー:', e.message); }
   });
