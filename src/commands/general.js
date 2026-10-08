@@ -1,9 +1,10 @@
 // 雑多なコマンド（GIF・ダイス・匿名・アクティビティ・purge など）
-import { SlashCommandBuilder } from 'discord.js';
+import { SlashCommandBuilder, PermissionFlagsBits, ChannelType } from 'discord.js';
 import { client } from '../client.js';
 import { db } from '../db.js';
 import { GUILD_ID, KLIPY_API_KEY, BOT_VERSION } from '../config.js';
-import { isAdmin } from '../util.js';
+import { isAdmin, replyLong, EPHEMERAL } from '../util.js';
+import { getMembers } from '../members.js';
 import { isBackupMessage } from '../backup.js';
 import { getRandomGif, getRandomGifByCategory, generateRandomKatakana } from '../features/fun.js';
 
@@ -280,6 +281,53 @@ export const commands = [
         console.log(`🗑️ purge: ${interaction.user.username} が #${channel.name} で ${deleted}件削除`);
       } catch (e) { await interaction.editReply(`❌ エラー: ${e.message}`).catch(() => {}); }
       return;
+    },
+  },
+  {
+    data: new SlashCommandBuilder().setName('channel-viewers').setDescription('このチャンネルを閲覧できるメンバーを一覧表示する（メンションなし）')
+      .addBooleanOption(o => o.setName('public').setDescription('結果を全員に見えるように表示する（省略時は自分だけ）'))
+      .addBooleanOption(o => o.setName('show-others').setDescription('メンバー表にいない人も表示する（省略時は人数だけ）')),
+    async execute(interaction) {
+      const isPublic   = interaction.options.getBoolean('public') ?? false;
+      const showOthers = interaction.options.getBoolean('show-others') ?? false;
+      await interaction.deferReply(isPublic ? {} : { flags: EPHEMERAL });
+      const guild   = await client.guilds.fetch(GUILD_ID);
+      const channel = interaction.channel ?? await client.channels.fetch(interaction.channelId);
+      const all     = await guild.members.fetch();
+
+      // スレッドは親チャンネルの権限で判定。プライベートスレッドはスレッドに参加している人だけ
+      const isThread  = channel.isThread?.() ?? false;
+      const permTarget = isThread ? channel.parent : channel;
+      const privateThreadMembers = isThread && channel.type === ChannelType.PrivateThread
+        ? new Set((await channel.members.fetch()).keys()) : null;
+      const canView = (member) => {
+        if (!member || !permTarget) return false;
+        if (privateThreadMembers && !privateThreadMembers.has(member.id)) return false;
+        return permTarget.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel) ?? false;
+      };
+
+      // メンバー表の名前単位。アカウントを複数持つ人は、どれか1つでも閲覧できれば「閲覧可」
+      const viewers = [], nonViewers = [];
+      const rosterIds = new Set();
+      for (const m of getMembers()) {
+        const ids = m.discordIds ?? [];
+        ids.forEach(id => rosterIds.add(id));
+        (ids.some(id => canView(all.get(id))) ? viewers : nonViewers).push(m.name);
+      }
+      const others = [...all.values()].filter(m => !m.user.bot && !rosterIds.has(m.id) && canView(m)).map(m => m.displayName);
+
+      const lines = [
+        `👀 **#${channel.name} を閲覧できるメンバー**${privateThreadMembers ? '（プライベートスレッド）' : ''}`,
+        '',
+        `✅ **閲覧できる (${viewers.length})**: ${viewers.join('、') || '―'}`,
+        `🚫 **閲覧できない (${nonViewers.length})**: ${nonViewers.join('、') || '―'}`,
+      ];
+      if (others.length > 0) {
+        lines.push(showOthers
+          ? `👤 **メンバー表にいない人 (${others.length})**: ${others.join('、')}`
+          : `👤 メンバー表にいない人も ${others.length}人 閲覧できます（show-others で表示）`);
+      }
+      return replyLong(interaction, lines.join('\n'), { ephemeral: !isPublic });
     },
   },
 ];
