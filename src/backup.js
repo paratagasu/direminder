@@ -30,13 +30,26 @@ onDbWrite(() => {
   timer = setTimeout(() => { timer = null; runBackup().catch(() => {}); }, DEBOUNCE_MS);
 });
 
+export function isBackupMessage(m) {
+  return m.author?.id === client.user.id && m.attachments?.some(a => a.name === FILE_NAME);
+}
+
+// 他のBotのテストなどでメッセージが流れても見つけられるよう、さかのぼって探す
+const SEARCH_LIMIT = 2000;
 async function findBackupMessage(channel) {
   if (messageId) {
     const m = await channel.messages.fetch(messageId).catch(() => null);
     if (m) return m;
   }
-  const msgs = await channel.messages.fetch({ limit: 50 });
-  return msgs.find(m => m.author.id === client.user.id && m.attachments.some(a => a.name === FILE_NAME)) ?? null;
+  let before;
+  for (let searched = 0; searched < SEARCH_LIMIT; searched += 100) {
+    const msgs = await channel.messages.fetch({ limit: 100, ...(before && { before }) });
+    const found = msgs.find(isBackupMessage);
+    if (found) return found;
+    if (msgs.size < 100) break;
+    before = msgs.last().id;
+  }
+  return null;
 }
 
 // バックアップを実行（同時実行しないよう直列化）

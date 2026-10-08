@@ -4,6 +4,7 @@ import { client } from '../client.js';
 import { db } from '../db.js';
 import { GUILD_ID, KLIPY_API_KEY, BOT_VERSION } from '../config.js';
 import { isAdmin } from '../util.js';
+import { isBackupMessage } from '../backup.js';
 import { getRandomGif, getRandomGifByCategory, generateRandomKatakana } from '../features/fun.js';
 
 export const commands = [
@@ -239,7 +240,8 @@ export const commands = [
           if (filtered.length < batch.size || batch.size < 100) break;
           lastId = batch.last()?.id;
         }
-        let targets = allMessages;
+        // 自動バックアップのメッセージは消さない
+        let targets = allMessages.filter(m => !isBackupMessage(m));
         if (onlyUser)    targets = targets.filter(m => m.author.id === onlyUser.id);
         if (excludeUser) targets = targets.filter(m => m.author.id !== excludeUser.id);
         if (matchText)   targets = targets.filter(m => matchType === 'exact' ? m.content === matchText : m.content.includes(matchText));
