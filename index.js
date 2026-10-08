@@ -122,6 +122,7 @@ const defaultData = {
   pendingDeleteSessions: {}, // userId → { msgId, events[], calendarId }
   saylaterJobs: {},          // interactionId → { fireAt, message, mentionId, channelId }
   gjData: { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} },
+  channelSnapshot: { savedAt: null, channels: {} },
 };
 
 const adapter = new JSONFile('settings.json');
@@ -137,6 +138,7 @@ db.data.activeVcSessions     ??= {};
 db.data.pendingDeleteSessions ??= {};
 db.data.saylaterJobs         ??= {};
 initGjData(db);
+db.data.channelSnapshot ??= { savedAt: null, channels: {} };
 db.data.gjData               ??= { points: {}, history: [], achievements: {}, dailySent: {}, gjChain: null, monthlyCounters: {} };
 db.data.gjData.points        ??= {};
 db.data.gjData.history       ??= [];
@@ -1104,6 +1106,29 @@ client.once('ready', async () => {
     new SlashCommandBuilder()
       .setName('saylatter-cancel').setDescription('伝言予約をキャンセルする')
       .addIntegerOption(o => o.setName('number').setDescription('キャンセルする番号（/saylatter-listで確認）').setRequired(true).setMinValue(1)),
+    new SlashCommandBuilder()
+      .setName('activity-save')
+      .setDescription('全チャンネルの現在の状態を記録する'),
+    new SlashCommandBuilder()
+      .setName('activity-check')
+      .setDescription('前回の記録以降に更新のあったチャンネルを表示する'),
+    new SlashCommandBuilder()
+      .setName('purge')
+      .setDescription('指定時間前までのメッセージを削除する（管理者専用）')
+      .addIntegerOption(o => o.setName('value').setDescription('数値').setRequired(true).setMinValue(1))
+      .addStringOption(o => o.setName('unit').setDescription('単位').setRequired(true)
+        .addChoices(
+          { name: '分前', value: 'minutes' },
+          { name: '時間前', value: 'hours' },
+        ))
+      .addUserOption(o => o.setName('exclude-user').setDescription('削除しないメンバー（任意）').setRequired(false))
+      .addUserOption(o => o.setName('only-user').setDescription('このメンバーのメッセージだけ削除（任意）').setRequired(false))
+      .addStringOption(o => o.setName('match-text').setDescription('一致するメッセージだけ削除（任意）').setRequired(false))
+      .addStringOption(o => o.setName('match-type').setDescription('一致方法').setRequired(false)
+        .addChoices(
+          { name: '部分一致', value: 'partial' },
+          { name: '完全一致', value: 'exact' },
+        )),
   ].map(c => c.toJSON());
 
   await new REST({ version: '10' }).setToken(DISCORD_TOKEN)
@@ -1512,7 +1537,7 @@ client.on('interactionCreate', async interaction => {
         pendingDeleteSessions: db.data.pendingDeleteSessions,
         saylaterJobs: db.data.saylaterJobs,
         gjData: db.data.gjData,
-        gjData: db.data.gjData,
+        channelSnapshot: db.data.channelSnapshot,
       };
       const buf = Buffer.from(JSON.stringify(state, null, 2), 'utf-8');
       const filename = `bot-state-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
@@ -1541,6 +1566,7 @@ client.on('interactionCreate', async interaction => {
         if (json.activeVcSessions)               db.data.activeVcSessions      = json.activeVcSessions;
         if (json.pendingDeleteSessions)          db.data.pendingDeleteSessions  = json.pendingDeleteSessions;
         if (json.saylaterJobs)                   db.data.saylaterJobs           = json.saylaterJobs;
+        if (json.channelSnapshot) db.data.channelSnapshot = json.channelSnapshot;
         // gjDataは完全に置き換え
         if (json.gjData !== undefined) {
           db.data.gjData = json.gjData;
@@ -1775,6 +1801,165 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({
         content: `✅ 伝言予約を設定しました\n　⏰ ${month}/${day} ${time} (${fireAtJst})\n　📝 ${message}\n　👤 ${mentionUser.displayName ?? mentionUser.username}\n　📍 <#${targetChannelId}>`,
       });
+    }
+  }
+
+    case 'activity-save': {
+      await interaction.deferReply({ flags: 64 });
+      try {
+        const guild    = await client.guilds.fetch(GUILD_ID);
+        const channels = await guild.channels.fetch();
+        const snapshot = {};
+        const now      = new Date().toISOString();
+
+        for (const ch of channels.values()) {
+          if (!ch) continue;
+          if (ch.type !== 0 && ch.type !== 5 && ch.type !== 15) continue;
+          try {
+            const messages = await ch.messages.fetch({ limit: 1 });
+            const last     = messages.first();
+            snapshot[ch.id] = {
+              name: ch.name, lastMessageId: last?.id ?? null,
+              lastMessageAt: last?.createdAt?.toISOString() ?? null, messageCount: 0,
+            };
+          } catch (e) {}
+          if (ch.threads) {
+            const threads = await ch.threads.fetchActive().catch(() => null);
+            if (threads) {
+              for (const thread of threads.threads.values()) {
+                try {
+                  const msgs = await thread.messages.fetch({ limit: 1 });
+                  const last = msgs.first();
+                  snapshot[thread.id] = {
+                    name: `#${ch.name} > ${thread.name}`, lastMessageId: last?.id ?? null,
+                    lastMessageAt: last?.createdAt?.toISOString() ?? null, messageCount: 0,
+                  };
+                } catch (e) {}
+              }
+            }
+          }
+        }
+        db.data.channelSnapshot = { savedAt: now, channels: snapshot };
+        await db.write();
+        const savedAtJst = new Date(now).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        return interaction.editReply(`✅ アクティビティを記録しました\n　保存日時: ${savedAtJst}\n　記録チャンネル数: ${Object.keys(snapshot).length}件`);
+      } catch (e) { return interaction.editReply(`❌ エラー: ${e.message}`); }
+    }
+
+    case 'activity-check': {
+      await interaction.deferReply({ flags: 64 });
+      try {
+        const snapshot = db.data.channelSnapshot;
+        if (!snapshot?.savedAt) return interaction.editReply('⚠️ まだ記録がありません。先に `/activity-save` を実行してください。');
+        const guild    = await client.guilds.fetch(GUILD_ID);
+        const channels = await guild.channels.fetch();
+        const savedAtJst = new Date(snapshot.savedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        const updated = [];
+        for (const ch of channels.values()) {
+          if (!ch) continue;
+          if (ch.type !== 0 && ch.type !== 5 && ch.type !== 15) continue;
+          const checkCh = async (channel, displayName) => {
+            try {
+              const saved = snapshot.channels[channel.id];
+              const msgs  = await channel.messages.fetch({ limit: 1 });
+              const last  = msgs.first();
+              if (!last) return;
+              if (!saved || last.id !== saved.lastMessageId) {
+                let count = 0;
+                if (saved?.lastMessageId) {
+                  const newMsgs = await channel.messages.fetch({ limit: 100, after: saved.lastMessageId }).catch(() => null);
+                  count = newMsgs?.size ?? 1;
+                } else { count = 1; }
+                const lastAtJst = last.createdAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' });
+                updated.push({ name: displayName, count, lastAt: lastAtJst, ts: last.createdTimestamp });
+              }
+            } catch (e) {}
+          };
+          await checkCh(ch, `#${ch.name}`);
+          if (ch.threads) {
+            const threads = await ch.threads.fetchActive().catch(() => null);
+            if (threads) {
+              for (const thread of threads.threads.values()) {
+                await checkCh(thread, `#${ch.name} > ${thread.name}`);
+              }
+            }
+          }
+        }
+        if (updated.length === 0) return interaction.editReply(`📭 **${savedAtJst}** 以降に更新のあったチャンネルはありません`);
+        updated.sort((a, b) => b.ts - a.ts);
+        let msg = `📊 **${savedAtJst}** から更新のあったチャンネル (${updated.length}件):\n\n`;
+        for (const u of updated.slice(0, 25)) {
+          msg += `**${u.name}**　新規 ${u.count}件　最終更新：${u.lastAt}\n`;
+        }
+        if (updated.length > 25) msg += `\n…他 ${updated.length - 25}件`;
+        return interaction.editReply(msg.slice(0, 2000));
+      } catch (e) { return interaction.editReply(`❌ エラー: ${e.message}`); }
+    }
+
+    case 'purge': {
+      const isAdmin = interaction.member?.permissions?.has?.('Administrator') ?? false;
+      if (!isAdmin) return interaction.reply({ content: '⛔ 管理者専用です', flags: 64 });
+      const value       = interaction.options.getInteger('value');
+      const unit        = interaction.options.getString('unit');
+      const excludeUser = interaction.options.getUser('exclude-user');
+      const onlyUser    = interaction.options.getUser('only-user');
+      const matchText   = interaction.options.getString('match-text');
+      const matchType   = interaction.options.getString('match-type') ?? 'partial';
+      const msMap       = { minutes: 60 * 1000, hours: 60 * 60 * 1000 };
+      const cutoff      = new Date(Date.now() - value * msMap[unit]);
+      const cutoffJst   = cutoff.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      await interaction.deferReply({ flags: 64 });
+      try {
+        const channel = interaction.channel;
+        let allMessages = [];
+        let lastId = null;
+        for (let i = 0; i < 5; i++) {
+          const opts = { limit: 100 };
+          if (lastId) opts.before = lastId;
+          const batch = await channel.messages.fetch(opts);
+          const filtered = [...batch.values()].filter(m => m.createdAt >= cutoff);
+          allMessages.push(...filtered);
+          if (filtered.length < batch.size || batch.size < 100) break;
+          lastId = batch.last()?.id;
+        }
+        let targets = allMessages;
+        if (onlyUser)    targets = targets.filter(m => m.author.id === onlyUser.id);
+        if (excludeUser) targets = targets.filter(m => m.author.id !== excludeUser.id);
+        if (matchText)   targets = targets.filter(m => matchType === 'exact' ? m.content === matchText : m.content.includes(matchText));
+        if (targets.length === 0) return interaction.editReply('📭 削除対象のメッセージがありませんでした');
+        const oldest     = [...targets].sort((a, b) => a.createdTimestamp - b.createdTimestamp)[0];
+        const confirmMsg = await oldest.reply({
+          content: `**${cutoffJst}** までのメッセージを **${targets.length}件** 削除しますか？\n✅ で削除、❌ でキャンセル`,
+          allowedMentions: { repliedUser: false }
+        });
+        await confirmMsg.react('✅');
+        await confirmMsg.react('❌');
+        await interaction.editReply('確認メッセージを送信しました');
+        const filter    = (r, u) => ['✅','❌'].includes(r.emoji.name) && u.id === interaction.user.id;
+        const collected = await confirmMsg.awaitReactions({ filter, max: 1, time: 60000 }).catch(() => null);
+        const reaction  = collected?.first();
+        if (!reaction || reaction.emoji.name === '❌') {
+          await confirmMsg.edit('🚫 削除をキャンセルしました');
+          return;
+        }
+        await confirmMsg.edit(`🗑️ ${targets.length}件のメッセージを削除中...`);
+        const now14  = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+        const bulk   = targets.filter(m => m.createdAt > now14 && m.id !== confirmMsg.id);
+        const single = targets.filter(m => m.createdAt <= now14 && m.id !== confirmMsg.id);
+        let deleted = 0;
+        for (let i = 0; i < bulk.length; i += 100) {
+          await channel.bulkDelete(bulk.slice(i, i + 100), true).catch(() => {});
+          deleted += Math.min(100, bulk.length - i);
+        }
+        for (const m of single) {
+          await m.delete().catch(() => {});
+          deleted++;
+          if (deleted % 10 === 0) await new Promise(r => setTimeout(r, 1000));
+        }
+        await confirmMsg.edit(`✅ ${deleted}件のメッセージを削除しました`);
+        console.log(`🗑️ purge: ${interaction.user.username} が #${channel.name} で ${deleted}件削除`);
+      } catch (e) { await interaction.editReply(`❌ エラー: ${e.message}`).catch(() => {}); }
+      break;
     }
   }
 });
