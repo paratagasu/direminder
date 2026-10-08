@@ -120,7 +120,7 @@ export async function syncAllEventsToCalendar() {
       }
     }
     await db.write();
-    console.log(`🔄 Googleカレンダー同期完了 (${new Date().toLocaleString('ja-JP')})`);
+    console.log(`🔄 Googleカレンダー同期完了 (${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })})`);
   } catch (e) {
     console.error('❌ Googleカレンダー同期失敗:', e.message);
   } finally {

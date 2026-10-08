@@ -56,10 +56,15 @@ export async function getRandomGif() {
 export async function getKlipyCategories() {
   try {
     const data = await klipyFetch('/gifs/categories');
-    console.log('🎬 Klipyカテゴリレスポンス keys:', Object.keys(data ?? {}).join(', '));
-    // レスポンス形式を柔軟に処理
-    const result = data?.data ?? data?.tags ?? data?.results ?? data?.categories ?? [];
-    return Array.isArray(result) ? result : [];
+    // レスポンス形式を柔軟に処理（Klipy は { result, data: { categories: [...] } } のように入れ子になっている）
+    const candidates = [
+      data?.data, data?.data?.categories, data?.data?.data, data?.data?.tags,
+      data?.categories, data?.tags, data?.results,
+    ];
+    const list = candidates.find(c => Array.isArray(c) && c.length > 0) ?? [];
+    if (list.length === 0) console.log('🎬 Klipyカテゴリ形式不明:', JSON.stringify(data).slice(0, 300));
+    // { category, query } 形式にも対応
+    return list.map(c => (typeof c === 'string' ? c : { name: c.name ?? c.category ?? c.title ?? c.query, slug: c.query ?? c.slug ?? c.searchterm ?? c.name ?? c.category }));
   } catch (e) {
     console.error('カテゴリ取得失敗:', e.message);
     return [];

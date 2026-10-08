@@ -330,6 +330,20 @@ export async function reconcileAttendance() {
       const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID).catch(() => null);
       const msg = channel ? await channel.messages.fetch(msgId).catch(() => null) : null;
       if (!event || !msg) continue;
+      if (msg.components?.length > 0) {
+        // すでにボタン式に変換済みなのに出欠データが無い（古いエクスポートを読み込んだ等）。
+        // リアクションは消えているので、今のロール保持者を出席として復元し、ロールは触らない
+        const roleId = db.data.eventRoles[eventId];
+        const role = roleId ? await guild.roles.fetch(roleId).catch(() => null) : null;
+        const yes = role ? [...role.members.keys()] : [];
+        const names = Object.fromEntries(yes.map(id => [id, guild.members.cache.get(id)?.displayName ?? id]));
+        db.data.attendance[eventId] = { eventName: event.name, info: buildInfo(event), yes, no: [], names, channelId: channel.id, msgId };
+        await db.write();
+        await msg.edit(buildAttendanceMessage(eventId, db.data.attendance[eventId])).catch(() => {});
+        console.warn(`⚠️ 出欠データが無いため参加予定ロールから復元: "${event.name}"（出席 ${yes.length}名・欠席は不明）`);
+        result.checked++;
+        continue;
+      }
       const readUsers = async (name) => {
         const r = msg.reactions.cache.find(x => x.emoji.name === name);
         if (!r) return [];
