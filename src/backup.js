@@ -75,7 +75,7 @@ let lastFingerprint = null;
 let running = Promise.resolve();
 
 onDbWrite(() => {
-  if (!backupStatus.enabled || timer) return;
+  if (!backupStatus.configured || !backupStatus.enabled || timer) return;
   timer = setTimeout(() => { timer = null; runBackup().catch(() => {}); }, DEBOUNCE_MS);
 });
 
@@ -178,7 +178,7 @@ export async function restoreFromBackup() {
   }
 }
 
-export function enableBackup() { backupStatus.enabled = true; }
+export function enableBackup() { if (backupStatus.configured) backupStatus.enabled = true; }
 
 // 終了時（Koyebの再デプロイ時など）に未保存の変更を書き出す
 export async function flushBackup() {
