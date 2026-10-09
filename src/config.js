@@ -15,7 +15,7 @@ export const {
 export const PORT = process.env.PORT ?? 3000;
 export const HEALTH_CHECK_URL = process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
 export const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
-export const BOT_VERSION = '2.36.0';
+export const BOT_VERSION = '2.36.1';
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ 必要な環境変数が不足しています');
