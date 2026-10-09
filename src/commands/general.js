@@ -178,12 +178,13 @@ export const commands = [
               }
             } catch (e) {}
           };
-          await checkCh(ch, `#${ch.name}`);
+          // <#ID> はクリックできるチャンネルリンクとして表示される（通知は飛ばない）
+          await checkCh(ch, `<#${ch.id}>`);
           if (ch.threads) {
             const threads = await ch.threads.fetchActive().catch(() => null);
             if (threads) {
               for (const thread of threads.threads.values()) {
-                await checkCh(thread, `#${ch.name} > ${thread.name}`);
+                await checkCh(thread, `<#${ch.id}> > <#${thread.id}>`);
               }
             }
           }
@@ -191,11 +192,11 @@ export const commands = [
         if (updated.length === 0) return interaction.editReply(`📭 **${savedAtJst}** 以降に更新のあったチャンネルはありません`);
         updated.sort((a, b) => b.ts - a.ts);
         let msg = `📊 **${savedAtJst}** から更新のあったチャンネル (${updated.length}件):\n\n`;
-        for (const u of updated.slice(0, 25)) {
-          msg += `**${u.name}**　新規 ${u.count}件　最終更新：${u.lastAt}\n`;
+        for (const u of updated.slice(0, 50)) {
+          msg += `${u.name}　新規 ${u.count}件　最終更新：${u.lastAt}\n`;
         }
-        if (updated.length > 25) msg += `\n…他 ${updated.length - 25}件`;
-        return interaction.editReply(msg.slice(0, 2000));
+        if (updated.length > 50) msg += `\n…他 ${updated.length - 50}件`;
+        return replyLong(interaction, msg, { ephemeral: true });
       } catch (e) { return interaction.editReply(`❌ エラー: ${e.message}`); }
     },
   },
