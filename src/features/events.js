@@ -34,6 +34,51 @@ export async function fetchWeekEvents(guild) {
   return all.filter(e => e.scheduledStartTimestamp >= now && e.scheduledStartTimestamp <= weekLater);
 }
 
+// ============================================================
+// リマインド停止（ミュート）
+// ============================================================
+// db.data.mutedEvents[eventId] = { name, startTs, all, hideMorning, by, at }
+// ・all=false … その回だけ（繰り返しイベントは次の回から元に戻る）
+// ・all=true  … 毎回（繰り返しイベントの全ての回）
+// ・hideMorning … 朝の出欠カードも出さない
+export function getMute(e) {
+  const m = db.data.mutedEvents?.[e.id];
+  if (!m) return null;
+  if (m.all || jstDateKey(m.startTs) === jstDateKey(e.scheduledStartTimestamp)) return m;
+  return null;
+}
+
+export async function muteEvent(e, { all = false, hideMorning = false, by = null } = {}) {
+  db.data.mutedEvents[e.id] = { name: e.name, startTs: e.scheduledStartTimestamp, all, hideMorning, by, at: new Date().toISOString() };
+  await db.write();
+  await scheduleEventReminders();           // 登録済みのリマインドを止める
+  await refreshAttendanceMessage(e.id);     // 今日の出欠カードがあれば表示を更新
+}
+
+export async function unmuteEvent(eventId) {
+  const m = db.data.mutedEvents?.[eventId];
+  if (!m) return null;
+  delete db.data.mutedEvents[eventId];
+  await db.write();
+  await scheduleEventReminders();
+  await refreshAttendanceMessage(eventId);
+  return m;
+}
+
+// 終わった回・消えたイベントのミュートを片付ける
+async function pruneMutes(guild) {
+  const entries = Object.entries(db.data.mutedEvents ?? {});
+  if (entries.length === 0) return;
+  const all = await guild.scheduledEvents.fetch();
+  let changed = false;
+  for (const [id, m] of entries) {
+    const e = all.get(id);
+    const passed = !m.all && m.startTs < Date.now() - 12 * 60 * 60 * 1000;
+    if (!e || passed) { delete db.data.mutedEvents[id]; changed = true; }
+  }
+  if (changed) await db.write();
+}
+
 // VC/ステージのイベントはチャンネルリンク、外部イベントは場所を表示
 export function eventPlace(e) {
   if (e.channelId) return `<https://discord.com/channels/${GUILD_ID}/${e.channelId}>`;
@@ -156,7 +201,7 @@ export function buildAttendanceMessage(eventId, att, closed = null) {
       { name: `✅ 出席 (${yes.length})`, value: nameList(yes), inline: true },
       { name: `❌ 欠席 (${no.length})`, value: nameList(no), inline: true },
     )
-    .setFooter({ text: closed ? closed.text : 'ボタンで出欠を登録（もう一度押すと取り消し）' });
+    .setFooter({ text: closed ? closed.text : `${isMutedToday(eventId) ? '🔕 リマインド停止中 ｜ ' : ''}ボタンで出欠を登録（もう一度押すと取り消し）` });
   if (info?.url) embed.setURL(info.url);
   if (getMembers().length > 0) {
     embed.addFields({ name: `❔ 未回答 (${unanswered.length})`, value: nameList(unanswered.map(u => u.name)), inline: true });
@@ -167,6 +212,12 @@ export function buildAttendanceMessage(eventId, att, closed = null) {
     components: attendanceButtons(eventId, !!closed),
     allowedMentions: { parse: [] },
   };
+}
+
+// 出欠カードは今日のイベントのものなので、今日の回がミュートされているかで判定
+function isMutedToday(eventId) {
+  const m = db.data.mutedEvents?.[eventId];
+  return !!m && (m.all || jstDateKey(m.startTs) === jstDateKey(Date.now()));
 }
 
 async function fetchAttendanceMessage(att) {
@@ -274,8 +325,10 @@ async function postAttendanceMessage(guild, channel, e) {
 export async function sendMorningSummary(withEveryone = true) {
   const guild   = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
+  await pruneMutes(guild).catch(e => console.error('ミュート整理失敗:', e.message));
   const events  = [...(await fetchTodaysEvents(guild)).values()]
     .filter(e => e.status === STATUS_SCHEDULED || e.status === STATUS_ACTIVE)
+    .filter(e => !getMute(e)?.hideMorning) // 「朝の一覧からも外す」ミュート
     .sort((a, b) => a.scheduledStartTimestamp - b.scheduledStartTimestamp);
   await stripAllEventRoles(guild);
   db.data.attendance = {};
@@ -300,6 +353,7 @@ async function postLateEvent(event) {
   if (db.data.lastMorningDate !== jstDateKey(Date.now())) return;
   if (jstDateKey(event.scheduledStartTimestamp) !== jstDateKey(Date.now())) return;
   if (db.data.attendance[event.id]) return;
+  if (getMute(event)?.hideMorning) return;
   const guild   = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
   await channel.send({ content: '🆕 本日のイベントが追加されました', allowedMentions: { parse: [] } });
@@ -420,12 +474,17 @@ export async function scheduleEventReminders() {
     registerCron(cronExprAt(at), fn, desc);
   };
 
+  // ミュート中のイベントはリマインド・開始アナウンス・未参加／未開始チェックをすべて行わない
+  // （登録しなければ、下の「不要なcronを停止」で既存のものも止まる）
+  const targets = [...events.values()].filter(e => !getMute(e));
+
   for (const offset of offsets) {
-    for (const e of events.values()) {
+    for (const e of targets) {
       if (e.status !== STATUS_SCHEDULED) continue;
       registerEventCron(new Date(e.scheduledStartTimestamp - offset * 60000), async () => {
         const g = await client.guilds.fetch(GUILD_ID);
         const current = (await g.scheduledEvents.fetch()).get(e.id);
+        if (current && getMute(current)) return; // 直前にミュートされた場合
         if (!current || current.status !== STATUS_SCHEDULED) return;
         const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
         const role = await getOrCreateEventRole(g, current);
@@ -438,7 +497,7 @@ export async function scheduleEventReminders() {
     }
   }
 
-  for (const e of events.values()) {
+  for (const e of targets) {
     if (e.status !== STATUS_SCHEDULED && e.status !== STATUS_ACTIVE) continue;
     const startTs = e.scheduledStartTimestamp;
 
@@ -446,6 +505,7 @@ export async function scheduleEventReminders() {
     registerEventCron(new Date(startTs), async () => {
       const g = await client.guilds.fetch(GUILD_ID);
       const current = (await g.scheduledEvents.fetch()).get(e.id);
+      if (current && getMute(current)) return; // 直前にミュートされた場合
       if (!current || current.status === STATUS_CANCELED || current.status === STATUS_COMPLETED) return;
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       await ch.send({ content: `@everyone\n🚀 **「${current.name}」が始まりました！**\n📍 会場: ${eventPlace(current)}\n🔗 イベント: <${eventUrl(current)}>`, allowedMentions: { parse: ['everyone'] } });
@@ -457,6 +517,7 @@ export async function scheduleEventReminders() {
     registerEventCron(new Date(startTs + 3 * 60000), async () => {
       const g = await client.guilds.fetch(GUILD_ID);
       const current = (await g.scheduledEvents.fetch()).get(e.id);
+      if (current && getMute(current)) return; // 直前にミュートされた場合
       if (!current) return;
       const ch   = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       const role = await getOrCreateEventRole(g, current);
@@ -474,6 +535,7 @@ export async function scheduleEventReminders() {
     registerEventCron(new Date(startTs + 5 * 60000), async () => {
       const g = await client.guilds.fetch(GUILD_ID);
       const current = (await g.scheduledEvents.fetch()).get(e.id);
+      if (current && getMute(current)) return; // 直前にミュートされた場合
       // 予定(SCHEDULED)のままなら未開始。開催中・完了・キャンセルなら何もしない
       if (!current || current.status !== STATUS_SCHEDULED) return;
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);

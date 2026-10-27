@@ -4,10 +4,10 @@ import { client } from '../client.js';
 import { db } from '../db.js';
 import { GUILD_ID } from '../config.js';
 import { jobMap } from '../cron.js';
-import { parseHHMM, formatHHMM } from '../time.js';
-import { replyLong } from '../util.js';
+import { parseHHMM, formatHHMM, jstParts, WEEKDAYS } from '../time.js';
+import { replyLong, isAdmin, EPHEMERAL } from '../util.js';
 import { calendarEnabled, syncAllEventsToCalendar } from '../calendar.js';
-import { fetchWeekEvents, sendMorningSummary, EVENT_JOB_PREFIX } from '../features/events.js';
+import { fetchWeekEvents, sendMorningSummary, EVENT_JOB_PREFIX, getMute, muteEvent, unmuteEvent } from '../features/events.js';
 import { bootstrapSchedules } from '../schedules.js';
 
 export const commands = [
@@ -133,7 +133,8 @@ export const commands = [
               reminders.push(`${offsetMin}分前 (${reminderJst})`);
             }
           }
-          msg += `**◆ ${e.name}**\n　状態: ${status}\n　開催: ${startJst}\n　参加予定: ${members}\n　リマインド: ${reminders.length > 0 ? reminders.join(', ') : '（未登録）'}\n\n`;
+          const mute = getMute(e);
+          msg += `**◆ ${e.name}**${mute ? `　🔕 リマインド停止中（${mute.all ? '毎回' : 'この回のみ'}）` : ''}\n　状態: ${status}\n　開催: ${startJst}\n　参加予定: ${members}\n　リマインド: ${reminders.length > 0 ? reminders.join(', ') : '（未登録）'}\n\n`;
         }
         return replyLong(interaction, msg);
       } catch (e) { return interaction.editReply(`❌ エラー: ${e.message}`); }
@@ -200,4 +201,96 @@ export const commands = [
       } catch (e) { return interaction.editReply(`❌ 失敗: ${e.message}`); }
     },
   },
+  // ============================================================
+  // イベントごとのリマインド停止（ミュート）
+  // ============================================================
+  {
+    data: new SlashCommandBuilder().setName('event-mute').setDescription('選んだイベントのリマインドを止める（主催者・管理者のみ）')
+      .addStringOption(o => o.setName('event').setDescription('イベント（入力すると候補が出ます）').setRequired(true).setAutocomplete(true))
+      .addBooleanOption(o => o.setName('every-time').setDescription('繰り返しイベントの全ての回で止める（省略時はこの回だけ）'))
+      .addBooleanOption(o => o.setName('hide-from-morning').setDescription('朝の出欠カードも出さない（省略時はカードは出す）')),
+    autocomplete: interaction => autocompleteEvents(interaction, { mutedOnly: false }),
+    async execute(interaction) {
+      const e = await findEvent(interaction.options.getString('event'));
+      if (!e) return interaction.reply({ content: '❌ イベントが見つかりません。候補から選んでください', flags: EPHEMERAL });
+      if (!isAdmin(interaction) && e.creatorId !== interaction.user.id) {
+        return interaction.reply({ content: '⛔ リマインドを止められるのは、そのイベントの主催者か管理者だけです', flags: EPHEMERAL });
+      }
+      const all = interaction.options.getBoolean('every-time') ?? false;
+      const hideMorning = interaction.options.getBoolean('hide-from-morning') ?? false;
+      await interaction.deferReply({ flags: EPHEMERAL });
+      await muteEvent(e, { all, hideMorning, by: interaction.user.id });
+      return interaction.editReply([
+        `🔕 「${e.name}」（${eventLabel(e)}）のリマインドを止めました`,
+        `　対象: ${all ? '毎回（繰り返しの全ての回）' : 'この回だけ'}`,
+        `　止まるもの: 事前リマインド・開始アナウンス・未参加／未開始チェック${hideMorning ? '・朝の出欠カード' : ''}`,
+        '　元に戻すときは `/event-unmute`',
+      ].join('\n'));
+    },
+  },
+  {
+    data: new SlashCommandBuilder().setName('event-unmute').setDescription('止めていたイベントのリマインドを再開する（主催者・管理者のみ）')
+      .addStringOption(o => o.setName('event').setDescription('イベント（入力すると候補が出ます）').setRequired(true).setAutocomplete(true)),
+    autocomplete: interaction => autocompleteEvents(interaction, { mutedOnly: true }),
+    async execute(interaction) {
+      const id = interaction.options.getString('event');
+      const m = db.data.mutedEvents?.[id];
+      if (!m) return interaction.reply({ content: '❌ そのイベントはリマインド停止中ではありません', flags: EPHEMERAL });
+      const e = await findEvent(id);
+      if (!isAdmin(interaction) && e?.creatorId !== interaction.user.id && m.by !== interaction.user.id) {
+        return interaction.reply({ content: '⛔ 再開できるのは、そのイベントの主催者・止めた人・管理者だけです', flags: EPHEMERAL });
+      }
+      await interaction.deferReply({ flags: EPHEMERAL });
+      await unmuteEvent(id);
+      return interaction.editReply(`🔔 「${m.name}」のリマインドを再開しました`);
+    },
+  },
+  {
+    data: new SlashCommandBuilder().setName('event-mute-list').setDescription('リマインドを止めているイベントの一覧'),
+    async execute(interaction) {
+      const entries = Object.entries(db.data.mutedEvents ?? {});
+      if (entries.length === 0) return interaction.reply({ content: '🔔 リマインドを止めているイベントはありません', flags: EPHEMERAL });
+      await interaction.deferReply({ flags: EPHEMERAL });
+      const lines = [`🔕 **リマインド停止中のイベント** (${entries.length}件)`, ''];
+      for (const [id, m] of entries) {
+        const e = await findEvent(id);
+        lines.push(`・**${m.name}**（${e ? eventLabel(e) : '日時不明'}）${m.all ? '　毎回' : '　この回のみ'}${m.hideMorning ? '・朝のカードなし' : ''}　止めた人: ${m.by ? `<@${m.by}>` : '―'}`);
+      }
+      return replyLong(interaction, lines.join('\n'), { ephemeral: true });
+    },
+  },
 ];
+
+// ---- イベント選択の補助
+function eventLabel(e) {
+  const p = jstParts(e.scheduledStartTimestamp);
+  return `${p.month}/${p.day}(${WEEKDAYS[p.weekday]}) ${formatHHMM(p.hour, p.minute)}`;
+}
+
+async function listEvents() {
+  const guild = await client.guilds.fetch(GUILD_ID);
+  // 候補は3秒以内に返す必要があるので、まずキャッシュ（1分ごとの再同期で更新されている）を使う
+  const cached = guild.scheduledEvents.cache;
+  const all = cached.size > 0 ? cached : await guild.scheduledEvents.fetch();
+  return [...all.values()].filter(e => e.status === 1 || e.status === 2)
+    .sort((a, b) => a.scheduledStartTimestamp - b.scheduledStartTimestamp);
+}
+
+async function findEvent(id) {
+  const guild = await client.guilds.fetch(GUILD_ID);
+  return guild.scheduledEvents.cache.get(id) ?? await guild.scheduledEvents.fetch(id).catch(() => null);
+}
+
+async function autocompleteEvents(interaction, { mutedOnly }) {
+  const q = interaction.options.getFocused().trim();
+  const events = await listEvents();
+  const choices = events
+    .filter(e => !mutedOnly || db.data.mutedEvents?.[e.id])
+    .filter(e => !q || e.name.includes(q))
+    .slice(0, 25)
+    .map(e => ({
+      name: `${getMute(e) ? '🔕 ' : ''}${e.recurrenceRule ? '🔁 ' : ''}${eventLabel(e)} ${e.name}`.slice(0, 100),
+      value: e.id,
+    }));
+  return interaction.respond(choices);
+}

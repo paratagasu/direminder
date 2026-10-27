@@ -70,6 +70,7 @@ Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの
 - 毎朝、イベントごとに出欠カード（埋め込み）を1枚投稿。「出席／欠席」ボタンを押すと本人にだけ結果が表示され、カードの出席・欠席・未回答がリアルタイムに更新されます（もう一度押すと取り消し）
 - 出欠はメンバー表の「名前」単位で集計。アカウントを複数持つ人は、どれか1つでも押していれば回答済み（出席が欠席より優先）
 - リマインドはイベント専用ロールへのメンション。次のリマインド・開始アナウンスを送ると、ひとつ前のリマインドは自動で消えます
+- `/event-mute` 選んだイベントのリマインドを止める（主催者・管理者。この回だけ／毎回、朝の出欠カードも出さない を選択可） `/event-unmute` `/event-mute-list`
 - `/set-morning-time` `/add-reminder-offset` `/remove-reminder-offset` `/list-reminder-offsets` `/week-events` `/force-remind` `/n-force-remind` `/debug-events`
 
 **カレンダー**
