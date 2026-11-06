@@ -10,12 +10,14 @@ export const {
   BACKUP_USER_ID, BACKUP_CHANNEL_ID,
   // 設定するとバックアップを暗号化する（任意の長い文字列）
   BACKUP_ENCRYPTION_KEY,
+  // タスク管理アプリ連携（イベント完了で議事録タスクを作る）。どちらも無ければ無効
+  TASKAPP_URL, TASKAPP_SECRET,
 } = process.env;
 
 export const PORT = process.env.PORT ?? 3000;
 export const HEALTH_CHECK_URL = process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
 export const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
-export const BOT_VERSION = '2.37.0';
+export const BOT_VERSION = '2.38.0';
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ 必要な環境変数が不足しています');

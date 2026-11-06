@@ -10,6 +10,7 @@ import { getMembers } from '../members.js';
 import { EPHEMERAL } from '../util.js';
 import { deleteCalendarEvent, writeParticipantsToCalendar } from '../calendar.js';
 import { getGjPoints, checkAchievements, ensureMonthlyCounter } from '../gj.js';
+import { requestMinutesTask } from '../taskapp.js';
 
 const STATUS_SCHEDULED = 1, STATUS_ACTIVE = 2, STATUS_COMPLETED = 3, STATUS_CANCELED = 4;
 
@@ -662,6 +663,7 @@ export function registerEventHandlers() {
         await endVcSession(newEvent.id, newEvent.name);
         await deleteEventRole(guild, newEvent.id);
         await closeAttendance(newEvent.id, '🏁 このイベントは終了しました', 'ended');
+        requestMinutesTask(newEvent).catch(err => console.error('議事録タスク連携エラー:', err.message)); // 待たない
       } else if (newEvent.status === STATUS_CANCELED) {
         await deleteEventRole(guild, newEvent.id);
         await deleteCalendarEvent(newEvent.id, newEvent.name);

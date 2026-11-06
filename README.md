@@ -46,6 +46,8 @@ src/
 | `BACKUP_USER_ID` | **自動バックアップを送るユーザーID**（そのユーザーへのDMに保存・推奨） |
 | `BACKUP_CHANNEL_ID` | 自動バックアップ先チャンネルID（`BACKUP_USER_ID` が無いときに使用） |
 | `BACKUP_ENCRYPTION_KEY` | 設定するとバックアップを暗号化（任意の長い文字列・推奨） |
+| `TASKAPP_URL` | タスク管理アプリの公開URL（イベント完了で「議事録作成」タスクを作る・任意） |
+| `TASKAPP_SECRET` | タスク管理アプリの `DISCORD_TASK_SECRET` と同じ値（`TASKAPP_URL` とセットで設定） |
 
 ## 自動バックアップ
 
