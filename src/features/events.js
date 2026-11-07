@@ -655,16 +655,29 @@ export function registerEventHandlers() {
       if (newEvent.guildId !== GUILD_ID) return;
       const guild = await client.guilds.fetch(GUILD_ID);
 
+      // 開始した回の開始時刻を覚えておく（繰り返しイベントは、終わると次の回の時刻に変わるため）
+      db.data.activeEventStarts ??= {};
+      const startedAt = db.data.activeEventStarts[newEvent.id];
+      const completed = newEvent.status === STATUS_COMPLETED && oldEvent?.status !== STATUS_COMPLETED;
+      // 繰り返しイベントは、終了しても COMPLETED にならず、次の回の SCHEDULED に戻る
+      const recurringEnded = newEvent.status === STATUS_SCHEDULED && (oldEvent?.status === STATUS_ACTIVE || startedAt !== undefined);
+
       if (newEvent.status === STATUS_ACTIVE && oldEvent?.status !== STATUS_ACTIVE) {
         console.log(`▶ イベント開始: "${newEvent.name}"`);
+        db.data.activeEventStarts[newEvent.id] = newEvent.scheduledStartTimestamp;
+        await db.write();
         await startVcSession(newEvent);
-      } else if (newEvent.status === STATUS_COMPLETED && oldEvent?.status !== STATUS_COMPLETED) {
-        console.log(`⏹ イベント完了: "${newEvent.name}"`);
+      } else if (completed || recurringEnded) {
+        console.log(`⏹ イベント完了: "${newEvent.name}"${recurringEnded ? '（繰り返し）' : ''}`);
+        const startTs = startedAt ?? (recurringEnded ? oldEvent?.scheduledStartTimestamp : undefined) ?? newEvent.scheduledStartTimestamp;
+        if (startedAt !== undefined) { delete db.data.activeEventStarts[newEvent.id]; await db.write(); }
+        // 議事録タスクは最初に依頼する（後の処理が失敗しても作られるように。待たない）
+        requestMinutesTask(newEvent, startTs).catch(err => console.error('議事録タスク連携エラー:', err.message));
         await endVcSession(newEvent.id, newEvent.name);
         await deleteEventRole(guild, newEvent.id);
         await closeAttendance(newEvent.id, '🏁 このイベントは終了しました', 'ended');
-        requestMinutesTask(newEvent).catch(err => console.error('議事録タスク連携エラー:', err.message)); // 待たない
       } else if (newEvent.status === STATUS_CANCELED) {
+        delete db.data.activeEventStarts[newEvent.id];
         await deleteEventRole(guild, newEvent.id);
         await deleteCalendarEvent(newEvent.id, newEvent.name);
         delete db.data.activeVcSessions[newEvent.id];

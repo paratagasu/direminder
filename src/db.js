@@ -15,6 +15,7 @@ const defaultData = {
   lastReminderMsgIds: [],
   vcExcludeUsers: [],
   activeVcSessions: {},
+  activeEventStarts: {}, // 開始したイベントの回の開始時刻（議事録タスク用）
   pendingDeleteSessions: {}, // userId → { msgId, events[], calendarId }
   saylaterJobs: {},          // interactionId → { fireAt, message, mentionId, channelId }
   repeatJobs: {},            // id → { freq, time, weekday, day, message, mentionId, channelId, createdBy, paused }
@@ -33,6 +34,7 @@ export function normalizeData(data) {
   data.lastReminderMsgIds    ??= [];
   data.vcExcludeUsers        ??= [];
   data.activeVcSessions      ??= {};
+  data.activeEventStarts     ??= {};
   data.pendingDeleteSessions ??= {};
   data.saylaterJobs          ??= {};
   data.repeatJobs            ??= {};
