@@ -14,13 +14,14 @@ async function post(body) {
   return data;
 }
 
-export async function requestMinutesTask(e) {
+// startTs: 開催した回の開始時刻（繰り返しイベントは、終わった時点で次の回の時刻になっているため別に渡す）
+export async function requestMinutesTask(e, startTs = e.scheduledStartTimestamp) {
   if (!TASKAPP_URL || !TASKAPP_SECRET) return;
   const body = {
     eventId: e.id,
     name: e.name,
     url: `https://discord.com/events/${GUILD_ID}/${e.id}`,
-    startAt: new Date(e.scheduledStartTimestamp).toISOString(),
+    startAt: new Date(startTs).toISOString(),
   };
   // 失敗したら1分後にもう1回だけ（アプリ側で同じ回は2回作らないので、重複はしない）
   for (let attempt = 1; attempt <= 2; attempt++) {
