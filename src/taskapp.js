@@ -14,9 +14,22 @@ async function post(body) {
   return data;
 }
 
+export const taskappEnabled = !!(TASKAPP_URL && TASKAPP_SECRET);
+export const taskappUrl = TASKAPP_URL ? TASKAPP_URL.replace(/\/+$/, '') : null;
+
+// Botが開催（開始・終了）を追跡できる会場か。
+// VC・ステージのイベントは追跡できるが、場所指定（サーバー外）のイベントは
+// 主催者が開始・終了を押さないことが多く、開催したかどうかが分からない
+export function isTrackable(e) {
+  return !!e.channelId;
+}
+
 // startTs: 開催した回の開始時刻（繰り返しイベントは、終わった時点で次の回の時刻になっているため別に渡す）
+// 戻り値: 'created'（作成した）| 'exists'（作成済みだった）| 'failed'（失敗）| 'skipped'（連携なし・サーバー外のイベント）
 export async function requestMinutesTask(e, startTs = e.scheduledStartTimestamp) {
-  if (!TASKAPP_URL || !TASKAPP_SECRET) return;
+  if (!taskappEnabled) return 'skipped';
+  // 追跡できない会場のイベントは、開始時に手動作成をお願いしているので自動では作らない（二重作成を防ぐ）
+  if (!isTrackable(e)) { console.log(`📝 議事録タスクは手動作成の対象（サーバー外のイベント）: "${e.name}"`); return 'skipped'; }
   const body = {
     eventId: e.id,
     name: e.name,
@@ -28,10 +41,23 @@ export async function requestMinutesTask(e, startTs = e.scheduledStartTimestamp)
     try {
       const r = await post(body);
       console.log(r.created ? `📝 議事録タスク作成: "${e.name}"` : `📝 議事録タスクは作成済み: "${e.name}"`);
-      return;
+      return r.created ? 'created' : 'exists';
     } catch (err) {
       console.error(`❌ 議事録タスク作成失敗（${attempt}回目）: "${e.name}"`, err.message);
       if (attempt === 1) await new Promise(r => setTimeout(r, 60_000));
     }
   }
+  return 'failed';
+}
+
+// 「タスク管理ツール」をアプリへのリンクにした文字列（<> で囲んでプレビューを出さない）
+export function taskappLink(label = 'タスク管理ツール') {
+  return taskappUrl ? `[${label}](<${taskappUrl}>)` : label;
+}
+
+// 議事録タスクの結果を、会議お疲れメッセージに添える1行
+export function minutesResultLine(result) {
+  if (result === 'created' || result === 'exists') return `📝 俺の方から${taskappLink()}に議事録作成のタスクを作成しておいたぜ！`;
+  if (result === 'failed') return '⚠️ 議事録作成は何らかの理由で失敗したぜ！';
+  return null;
 }
