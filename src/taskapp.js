@@ -14,9 +14,21 @@ async function post(body) {
   return data;
 }
 
+export const taskappEnabled = !!(TASKAPP_URL && TASKAPP_SECRET);
+export const taskappUrl = TASKAPP_URL ? TASKAPP_URL.replace(/\/+$/, '') : null;
+
+// Botが開催（開始・終了）を追跡できる会場か。
+// VC・ステージのイベントは追跡できるが、場所指定（サーバー外）のイベントは
+// 主催者が開始・終了を押さないことが多く、開催したかどうかが分からない
+export function isTrackable(e) {
+  return !!e.channelId;
+}
+
 // startTs: 開催した回の開始時刻（繰り返しイベントは、終わった時点で次の回の時刻になっているため別に渡す）
 export async function requestMinutesTask(e, startTs = e.scheduledStartTimestamp) {
   if (!TASKAPP_URL || !TASKAPP_SECRET) return;
+  // 追跡できない会場のイベントは、開始時に手動作成をお願いしているので自動では作らない（二重作成を防ぐ）
+  if (!isTrackable(e)) { console.log(`📝 議事録タスクは手動作成の対象（サーバー外のイベント）: "${e.name}"`); return; }
   const body = {
     eventId: e.id,
     name: e.name,

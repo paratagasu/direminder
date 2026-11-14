@@ -10,7 +10,7 @@ import { getMembers } from '../members.js';
 import { EPHEMERAL } from '../util.js';
 import { deleteCalendarEvent, writeParticipantsToCalendar } from '../calendar.js';
 import { getGjPoints, checkAchievements, ensureMonthlyCounter } from '../gj.js';
-import { requestMinutesTask } from '../taskapp.js';
+import { requestMinutesTask, taskappEnabled, taskappUrl, isTrackable } from '../taskapp.js';
 
 const STATUS_SCHEDULED = 1, STATUS_ACTIVE = 2, STATUS_COMPLETED = 3, STATUS_CANCELED = 4;
 
@@ -509,7 +509,11 @@ export async function scheduleEventReminders() {
       if (current && getMute(current)) return; // 直前にミュートされた場合
       if (!current || current.status === STATUS_CANCELED || current.status === STATUS_COMPLETED) return;
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
-      await ch.send({ content: `@everyone\n🚀 **「${current.name}」が始まりました！**\n📍 会場: ${eventPlace(current)}\n🔗 イベント: <${eventUrl(current)}>`, allowedMentions: { parse: ['everyone'] } });
+      // サーバー外（場所指定）のイベントは開催を追跡できないので、議事録タスクの手動作成をお願いする
+      const minutesNote = taskappEnabled && !isTrackable(current)
+        ? `\n📝 このイベントはサーバー外で開催されるため、Botが開催を追跡できず **議事録作成のタスクは自動で作られません**。終わったら、タスク管理アプリで手動で作成してください → <${taskappUrl}>`
+        : '';
+      await ch.send({ content: `@everyone\n🚀 **「${current.name}」が始まりました！**\n📍 会場: ${eventPlace(current)}\n🔗 イベント: <${eventUrl(current)}>${minutesNote}`, allowedMentions: { parse: ['everyone'] } });
       // 開始したら直前のリマインドは不要なので消す
       await replaceReminderNotice(e.id, null);
     }, `${EVENT_JOB_PREFIX}${e.id}:start`);
