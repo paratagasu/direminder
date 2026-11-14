@@ -10,7 +10,7 @@ import { getMembers } from '../members.js';
 import { EPHEMERAL } from '../util.js';
 import { deleteCalendarEvent, writeParticipantsToCalendar } from '../calendar.js';
 import { getGjPoints, checkAchievements, ensureMonthlyCounter } from '../gj.js';
-import { requestMinutesTask, taskappEnabled, taskappUrl, isTrackable } from '../taskapp.js';
+import { requestMinutesTask, taskappEnabled, taskappLink, isTrackable, minutesResultLine } from '../taskapp.js';
 
 const STATUS_SCHEDULED = 1, STATUS_ACTIVE = 2, STATUS_COMPLETED = 3, STATUS_CANCELED = 4;
 
@@ -511,7 +511,7 @@ export async function scheduleEventReminders() {
       const ch = await g.channels.fetch(ANNOUNCE_CHANNEL_ID);
       // サーバー外（場所指定）のイベントは開催を追跡できないので、議事録タスクの手動作成をお願いする
       const minutesNote = taskappEnabled && !isTrackable(current)
-        ? `\n📝 このイベントはサーバー外で開催されるため、Botが開催を追跡できず **議事録作成のタスクは自動で作られません**。終わったら、タスク管理アプリで手動で作成してください → <${taskappUrl}>`
+        ? `\n📝 このイベントはサーバー外で開催されるため、Botが開催を追跡できず **議事録作成のタスクは自動で作られません**。終わったら、${taskappLink()}で手動で作成してください`
         : '';
       await ch.send({ content: `@everyone\n🚀 **「${current.name}」が始まりました！**\n📍 会場: ${eventPlace(current)}\n🔗 イベント: <${eventUrl(current)}>${minutesNote}`, allowedMentions: { parse: ['everyone'] } });
       // 開始したら直前のリマインドは不要なので消す
@@ -583,7 +583,9 @@ async function startVcSession(event) {
   } catch (e) { console.error(`❌ VCセッション開始失敗:`, e.message); }
 }
 
+// 戻り値: 送った「ナイス会議参加」メッセージ（送らなかったときは null）
 async function endVcSession(eventId, eventName) {
+  let gjMessage = null;
   try {
     const connection = getVoiceConnection(GUILD_ID);
 
@@ -603,7 +605,7 @@ async function endVcSession(eventId, eventName) {
         try {
           const ch = await guild.channels.fetch(ANNOUNCE_CHANNEL_ID);
           const mentions = targets.map(id => `<@${id}>`).join('');
-          await ch.send({ content: `${mentions}\n🔥 お前等、ナイス会議参加だったぜ！！俺からお前等全員にGJを送ってやる！！`, allowedMentions: { users: targets } });
+          gjMessage = await ch.send({ content: `${mentions}\n🔥 お前等、ナイス会議参加だったぜ！！俺からお前等全員にGJを送ってやる！！`, allowedMentions: { users: targets } });
           for (const uid of targets) {
             const member = await guild.members.fetch(uid).catch(() => null);
             if (!member) continue;
@@ -627,6 +629,20 @@ async function endVcSession(eventId, eventName) {
     await db.write();
     console.log(`🎙️ VCセッション終了: "${eventName}"`);
   } catch (e) { console.error(`❌ VCセッション終了失敗:`, e.message); }
+  return gjMessage;
+}
+
+// 議事録タスクの結果を「ナイス会議参加」メッセージに書き足す（編集なので通知は飛ばない）。
+// そのメッセージが無いとき（VC参加者がいない等）は、お知らせチャンネルに1行だけ送る
+async function reportMinutesResult(minutesPromise, gjMessage) {
+  const line = minutesResultLine(await minutesPromise);
+  if (!line) return;
+  if (gjMessage) {
+    await gjMessage.edit({ content: `${gjMessage.content}\n${line}`, allowedMentions: { parse: [] } });
+  } else {
+    const ch = await client.channels.fetch(ANNOUNCE_CHANNEL_ID);
+    await ch.send({ content: line, allowedMentions: { parse: [] } });
+  }
 }
 
 // ============================================================
@@ -676,8 +692,11 @@ export function registerEventHandlers() {
         const startTs = startedAt ?? (recurringEnded ? oldEvent?.scheduledStartTimestamp : undefined) ?? newEvent.scheduledStartTimestamp;
         if (startedAt !== undefined) { delete db.data.activeEventStarts[newEvent.id]; await db.write(); }
         // 議事録タスクは最初に依頼する（後の処理が失敗しても作られるように。待たない）
-        requestMinutesTask(newEvent, startTs).catch(err => console.error('議事録タスク連携エラー:', err.message));
-        await endVcSession(newEvent.id, newEvent.name);
+        const minutes = requestMinutesTask(newEvent, startTs)
+          .catch(err => { console.error('議事録タスク連携エラー:', err.message); return 'failed'; });
+        const gjMessage = await endVcSession(newEvent.id, newEvent.name);
+        // 結果を待つと再試行で1分ほどかかることがあるので、メッセージを先に送ってから書き足す（待たない）
+        reportMinutesResult(minutes, gjMessage).catch(err => console.error('議事録結果の通知失敗:', err.message));
         await deleteEventRole(guild, newEvent.id);
         await closeAttendance(newEvent.id, '🏁 このイベントは終了しました', 'ended');
       } else if (newEvent.status === STATUS_CANCELED) {
