@@ -693,7 +693,7 @@ export function registerEventHandlers() {
         if (startedAt !== undefined) { delete db.data.activeEventStarts[newEvent.id]; await db.write(); }
         // 議事録タスクは最初に依頼する（後の処理が失敗しても作られるように。待たない）
         const minutes = requestMinutesTask(newEvent, startTs)
-          .catch(err => { console.error('議事録タスク連携エラー:', err.message); return 'failed'; });
+          .catch(err => { console.error('議事録タスク連携エラー:', err.message); return { status: 'failed' }; });
         const gjMessage = await endVcSession(newEvent.id, newEvent.name);
         // 結果を待つと再試行で1分ほどかかることがあるので、メッセージを先に送ってから書き足す（待たない）
         reportMinutesResult(minutes, gjMessage).catch(err => console.error('議事録結果の通知失敗:', err.message));
