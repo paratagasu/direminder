@@ -6,7 +6,7 @@ import { registerCron, clearAllJobs } from './cron.js';
 import { sendMorningSummary, scheduleEventReminders } from './features/events.js';
 import { syncAllEventsToCalendar } from './calendar.js';
 import { restoreSaylaterJobs, restoreRepeatJobs } from './features/saylater.js';
-import { sendMonthlyAwards } from './gj.js';
+import { sendMonthlyAwards, checkChainTimeout } from './gj.js';
 
 export function bootstrapSchedules() {
   clearAllJobs();
@@ -26,4 +26,6 @@ export function bootstrapSchedules() {
   restoreRepeatJobs();
   // 月間表彰（毎月末日23:59）
   registerCron('59 23 L * *', () => sendMonthlyAwards(db, client, GUILD_ID), 'monthly-awards');
+  // GJコンボチェーンの時間切れ（最後のGJから1時間）をその時点で知らせる
+  registerCron('* * * * *', () => checkChainTimeout(db, client), 'gj-chain-timeout');
 }

@@ -58,6 +58,6 @@ export function taskappLink(label = 'タスク管理ツール') {
 // 議事録タスクの結果を、会議お疲れメッセージに添える1行
 export function minutesResultLine(result) {
   if (result === 'created' || result === 'exists') return `📝 俺の方から${taskappLink()}に議事録作成のタスクを作成しておいたぜ！`;
-  if (result === 'failed') return '⚠️ 議事録作成は何らかの理由で失敗したぜ！';
+  if (result === 'failed') return '⚠️ 議事録作成タスクの連携は何らかの理由で失敗したぜ！';
   return null;
 }
