@@ -116,10 +116,34 @@ export async function checkAchievements(db, client, GUILD_ID, userId, type, chan
 // ============================================================
 // コンボチェーン
 // ============================================================
-export async function processGjChain(db, client, GUILD_ID, fromId, toId, channelId) {
-  const now   = Date.now();
-  const chain = db.data.gjData.gjChain;
+// サーバー全体で1本のチェーン。GJを受け取った人が1時間以内に「別の人」へGJを送るとつながる。
+//   A→B→C → 2Hit（GJ CHAIN ×2）、→D で 3Hit …
+// ・すぐ送り返す（A→B のあと B→A）はチェーンには数えない（GJ COUNTER の対象）。チェーンは切れない
+// ・チェーンの「次の人」以外がGJを送ると途切れ、新しいチェーンが始まる
+// ・最後のGJから1時間たつと途切れる（1分ごとに確認して、その時点で知らせる）
+// 通知の場所: Hit と「途切れて爆裂」→ そのGJが送られたチャンネル / 時間切れの爆裂 → 最後にチェーンが伸びたチャンネル
+export const CHAIN_TIMEOUT_MS = 60 * 60 * 1000;
+const hitsOf = (c) => c.chain.length - 1;
 
+async function announceExplosion(client, chain, channelId) {
+  if (hitsOf(chain) < 2) return; // 連鎖が成立していない（1回だけの）チェーンは通知しない
+  try {
+    const ch = await client.channels.fetch(channelId);
+    await ch.send(`💥 コンボチェーンが **${hitsOf(chain)}Hit** で爆裂しました！Beat.`);
+  } catch (e) { console.error('チェーン爆裂の通知失敗:', e.message); }
+}
+
+// 時間切れのチェーンを片付ける（1分ごとに呼ぶ）
+export async function checkChainTimeout(db, client) {
+  const chain = db.data.gjData.gjChain;
+  if (!chain || Date.now() - chain.lastAt <= CHAIN_TIMEOUT_MS) return;
+  db.data.gjData.gjChain = null;
+  await db.write();
+  await announceExplosion(client, chain, chain.lastChannelId);
+}
+
+export async function processGjChain(db, client, GUILD_ID, fromId, toId, channelId) {
+  const now = Date.now();
   const getNames = async (ids) => {
     const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
     return Promise.all(ids.map(async id => {
@@ -128,73 +152,77 @@ export async function processGjChain(db, client, GUILD_ID, fromId, toId, channel
     }));
   };
 
-  // Hit数 = チェーン内のGJの回数（A→B→C なら 2Hit）
-  const hitsOf = (c) => c.chain.length - 1;
-  // 連鎖が成立した（2Hit以上の）チェーンだけ爆裂を通知する
-  const explode = async (c) => {
-    if (hitsOf(c) < 2) return;
-    try {
-      const ch = await client.channels.fetch(c.lastChannelId);
-      await ch.send(`💥 コンボチェーンが **${hitsOf(c)}Hit** で爆裂しました！Beat.`);
-    } catch (e) {}
-  };
-
-  // 1時間以上経過 → 爆裂
-  if (chain && now - chain.lastAt > 60 * 60 * 1000) {
-    await explode(chain);
+  // 時間切れ（1分ごとの確認より先にGJが来た場合）
+  let cur = db.data.gjData.gjChain;
+  if (cur && now - cur.lastAt > CHAIN_TIMEOUT_MS) {
     db.data.gjData.gjChain = null;
+    await announceExplosion(client, cur, cur.lastChannelId);
+    cur = null;
   }
-
-  const cur = db.data.gjData.gjChain;
 
   if (!cur) {
     db.data.gjData.gjChain = { chain: [fromId, toId], lastAt: now, lastChannelId: channelId };
-  } else {
-    const last = cur.chain[cur.chain.length - 1];
-    if (last === fromId) {
-      cur.chain.push(toId);
-      cur.lastAt = now;
-      cur.lastChannelId = channelId;
-      await db.write(); // チェーン状態を永続化
-      const hits = hitsOf(cur);
-      try {
-        const ch    = await client.channels.fetch(channelId);
-        const names = await getNames(cur.chain);
-        if (hits === 2) {
-          await ch.send(`🔥 **GJ CHAIN ×${hits}**\n${names.join(' → ')}\n🔥 サーバー内にグッジョブの連鎖が発生しました！`);
-        } else {
-          await ch.send(`🔥 **${hits}Hit!**\n${names.join(' → ')}`);
-        }
-      } catch (e) { console.error('チェーン通知失敗:', e.message); }
-    } else {
-      // チェーン途切れ → 爆裂して新チェーン開始
-      await explode(cur);
-      db.data.gjData.gjChain = { chain: [fromId, toId], lastAt: now, lastChannelId: channelId };
-    }
+    return;
   }
+
+  const last = cur.chain[cur.chain.length - 1];
+  const prev = cur.chain[cur.chain.length - 2];
+  if (last === fromId && toId === prev) {
+    // すぐ送り返した（GJ COUNTER）。チェーンには数えず、切りもしない
+    return;
+  }
+  if (last === fromId) {
+    cur.chain.push(toId);
+    cur.lastAt = now;
+    cur.lastChannelId = channelId;
+    const hits = hitsOf(cur);
+    try {
+      const ch    = await client.channels.fetch(channelId);
+      const names = await getNames(cur.chain);
+      if (hits === 2) {
+        await ch.send(`🔥 **GJ CHAIN ×${hits}**\n${names.join(' → ')}\n🔥 サーバー内にグッジョブの連鎖が発生しました！`);
+      } else {
+        await ch.send(`🔥 **${hits}Hit!**\n${names.join(' → ')}`);
+      }
+    } catch (e) { console.error('チェーン通知失敗:', e.message); }
+    return;
+  }
+
+  // チェーンの「次の人」以外がGJ → 途切れて爆裂（このGJが送られたチャンネルで知らせる）し、新しいチェーンを開始
+  db.data.gjData.gjChain = { chain: [fromId, toId], lastAt: now, lastChannelId: channelId };
+  await announceExplosion(client, cur, channelId);
 }
 
 // ============================================================
 // GJ COUNTER!!!
 // ============================================================
+// 24時間以内にもらったGJへの「お返し」。お返しされたGJには印を付け、1回のGJで何度も発動しないようにする
 export async function checkGjCounter(db, fromId, toId, channel) {
   const now = Date.now();
-  const received = db.data.gjData.history.filter(h =>
-    h.to === fromId && h.from === toId && !h.anonymous &&
+  const original = [...db.data.gjData.history].reverse().find(h =>
+    h.to === fromId && h.from === toId && !h.anonymous && !h.countered &&
     now - new Date(h.timestamp).getTime() < 24 * 60 * 60 * 1000
   );
-  if (received.length > 0) {
-    try { await channel.send(`# 🔥GJ COUNTER!!!`); } catch (e) {}
-    [fromId, toId].forEach(id => {
-      ensureMonthlyCounter(db, id).gjCounterCount++;
-    });
-  }
+  if (!original) return;
+  original.countered = true;
+  try { await channel.send(`# 🔥GJ COUNTER!!!`); } catch (e) {}
+  [fromId, toId].forEach(id => {
+    ensureMonthlyCounter(db, id).gjCounterCount++;
+  });
 }
 
 // ============================================================
 // GJ送信メイン処理
 // ============================================================
-export async function sendGoodJob(db, client, GUILD_ID, { fromId, fromName, toId, toName, reason, anonymous, channel }) {
+// 複数のGJが同時に届いても、チェーン・回数制限・実績がずれないよう1件ずつ順番に処理する
+let gjQueue = Promise.resolve();
+export function sendGoodJob(db, client, GUILD_ID, params) {
+  const p = gjQueue.then(() => sendGoodJobNow(db, client, GUILD_ID, params));
+  gjQueue = p.catch(() => {});
+  return p;
+}
+
+async function sendGoodJobNow(db, client, GUILD_ID, { fromId, fromName, toId, toName, reason, anonymous, channel }) {
   if (getDailySentCount(db, fromId, toId) >= 3) {
     return { success: false, reason: `❌ ${toName} への本日のGJは上限（3回）に達しています` };
   }

@@ -49,6 +49,8 @@ src/
 | `TASKAPP_URL` | タスク管理アプリの公開URL（イベント完了で「議事録作成」タスクを作る・任意） |
 | `TASKAPP_SECRET` | タスク管理アプリの `DISCORD_TASK_SECRET` と同じ値（`TASKAPP_URL` とセットで設定） |
 
+議事録タスクを作れたら、出欠カードのチャンネル（なければ `ANNOUNCE_CHANNEL_ID`）にタスクへのリンクを送ります。
+
 ## 自動バックアップ
 
 Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの状態を Discord に自動保存します。

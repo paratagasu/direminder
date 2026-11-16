@@ -1,11 +1,16 @@
 // タスク管理アプリ連携：イベントが完了したら「議事録作成」のタスクを作ってもらう
 // TASKAPP_URL（アプリの公開URL）と TASKAPP_SECRET（アプリの DISCORD_TASK_SECRET と同じ値）が無ければ何もしない
-import { GUILD_ID, TASKAPP_URL, TASKAPP_SECRET } from './config.js';
+import { client } from './client.js';
+import { db } from './db.js';
+import { GUILD_ID, ANNOUNCE_CHANNEL_ID, TASKAPP_URL, TASKAPP_SECRET } from './config.js';
+
+// 設定値に説明の文などが混ざっていても、URLの部分だけを使う
+const baseUrl = () => (TASKAPP_URL.match(/https?:\/\/[^\s<>]+/)?.[0] ?? TASKAPP_URL.trim()).replace(/\/+$/, '');
 
 async function post(body) {
-  const res = await fetch(`${TASKAPP_URL.replace(/\/+$/, '')}/api/internal/discord-event`, {
+  const res = await fetch(`${baseUrl()}/api/internal/discord-event`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${TASKAPP_SECRET}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${TASKAPP_SECRET.trim()}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000), // アプリが寝ていると起きるまで少しかかる
   });
@@ -15,7 +20,7 @@ async function post(body) {
 }
 
 export const taskappEnabled = !!(TASKAPP_URL && TASKAPP_SECRET);
-export const taskappUrl = TASKAPP_URL ? TASKAPP_URL.replace(/\/+$/, '') : null;
+export const taskappUrl = TASKAPP_URL ? baseUrl() : null;
 
 // Botが開催（開始・終了）を追跡できる会場か。
 // VC・ステージのイベントは追跡できるが、場所指定（サーバー外）のイベントは
@@ -41,6 +46,7 @@ export async function requestMinutesTask(e, startTs = e.scheduledStartTimestamp)
     try {
       const r = await post(body);
       console.log(r.created ? `📝 議事録タスク作成: "${e.name}"` : `📝 議事録タスクは作成済み: "${e.name}"`);
+      if (r.created && r.taskUrl) await announceTask(e, startTs, r.taskUrl);
       return r.created ? 'created' : 'exists';
     } catch (err) {
       console.error(`❌ 議事録タスク作成失敗（${attempt}回目）: "${e.name}"`, err.message);
@@ -58,6 +64,20 @@ export function taskappLink(label = 'タスク管理ツール') {
 // 議事録タスクの結果を、会議お疲れメッセージに添える1行
 export function minutesResultLine(result) {
   if (result === 'created' || result === 'exists') return `📝 俺の方から${taskappLink()}に議事録作成のタスクを作成しておいたぜ！`;
-  if (result === 'failed') return '⚠️ 議事録作成は何らかの理由で失敗したぜ！';
+  if (result === 'failed') return '⚠️ 議事録作成タスクの連携は何らかの理由で失敗したぜ！';
   return null;
+}
+
+// 作ったタスクへのリンクを送る（出欠カードのチャンネル、なければリマインドのチャンネル）
+async function announceTask(e, startTs, taskUrl) {
+  try {
+    const channelId = db.data.attendance?.[e.id]?.channelId ?? ANNOUNCE_CHANNEL_ID;
+    const ch = await client.channels.fetch(channelId);
+    const day = new Date(startTs).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric' });
+    const label = `${e.name}（${day}）`.replace(/[\[\]]/g, '');
+    // [文字](<URL>) … 文字がリンクになり、URLのプレビューは出さない
+    await ch.send({ content: `📝 議事録作成のタスクはここに用意しておいたぜ！ → [${label}](<${taskUrl}>)`, allowedMentions: { parse: [] } });
+  } catch (err) {
+    console.error(`❌ 議事録タスクのリンク送信失敗: "${e.name}"`, err.message);
+  }
 }
