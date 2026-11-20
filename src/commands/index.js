@@ -11,8 +11,9 @@ import * as members from './members.js';
 import * as saylater from './saylater.js';
 import * as goodjob from './goodjob.js';
 import * as state from './state.js';
+import * as exportChat from './exportChat.js';
 
-const modules = [general, reminders, calendarCmds, members, saylater, goodjob, state];
+const modules = [general, reminders, calendarCmds, members, saylater, goodjob, state, exportChat];
 const allCommands = modules.flatMap(m => m.commands);
 
 // ボタン・モーダルの customId の先頭（"att:..." の "att"）→ ハンドラ

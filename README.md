@@ -48,6 +48,7 @@ src/
 | `BACKUP_ENCRYPTION_KEY` | 設定するとバックアップを暗号化（任意の長い文字列・推奨） |
 | `TASKAPP_URL` | タスク管理アプリの公開URL（イベント完了で「議事録作成」タスクを作る・任意） |
 | `TASKAPP_SECRET` | タスク管理アプリの `DISCORD_TASK_SECRET` と同じ値（`TASKAPP_URL` とセットで設定） |
+| `EXPORT_CHAT_ROLE_IDS` | `/export_chat` を管理者以外にも許可するロールID（カンマ区切り・任意） |
 
 議事録タスクを作れたら、会議終了時の「ナイス会議参加」メッセージ（VC参加者がいなければ `ANNOUNCE_CHANNEL_ID` への1行）に、作ったタスクへのリンクを書き足します。
 
@@ -98,3 +99,4 @@ Koyeb はリデプロイのたびに `settings.json` が消えるため、Botの
 - `/gif-random` `/gif-category` `/random-katakana` `/dice` `/anonymous` `/activity-save` `/activity-check` `/purge` `/version`
 - `/channel-viewers` 実行したチャンネルを閲覧できるメンバーをメンバー表の名前で一覧表示（メンションなし・複数アカウントはどれか1つで閲覧可）
 - 管理: `/state-export` `/state-import` `/backup-status` `/backup-now`
+- `/export_chat start:<リンクかID> end:<リンクかID・省略で最新まで>` 指定範囲のメッセージを JSONL で実行者のDMに送る（管理者か `EXPORT_CHAT_ROLE_IDS` のロール。ボイスチャンネルのテキストチャット・テキストチャンネル・スレッドに対応。1回10,000件まで、8MBごとに分割、システムメッセージは除外。本文はログに残さず、ファイルもBot側に保存しない）
