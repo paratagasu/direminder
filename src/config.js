@@ -12,12 +12,14 @@ export const {
   BACKUP_ENCRYPTION_KEY,
   // タスク管理アプリ連携（イベント完了で議事録タスクを作る）。どちらも無ければ無効
   TASKAPP_URL, TASKAPP_SECRET,
+  // /export_chat を管理者以外にも許可するロールID（カンマ区切り・任意）
+  EXPORT_CHAT_ROLE_IDS,
 } = process.env;
 
 export const PORT = process.env.PORT ?? 3000;
 export const HEALTH_CHECK_URL = process.env.HEALTH_CHECK_URL || `http://localhost:${PORT}`;
 export const DEFAULT_REMIND_CHANNEL_ID = '1357515614498848909';
-export const BOT_VERSION = '2.40.1';
+export const BOT_VERSION = '2.41.0';
 
 if (!DISCORD_TOKEN || !GUILD_ID || !ANNOUNCE_CHANNEL_ID) {
   console.error('⚠️ 必要な環境変数が不足しています');
